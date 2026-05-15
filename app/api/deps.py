@@ -1,4 +1,4 @@
-"""FastAPI dependencies for auth and role enforcement."""
+"""FastAPI dependencies for auth, role enforcement, and tenant-scoped sessions."""
 
 from collections.abc import AsyncIterator, Awaitable, Callable
 from uuid import UUID
@@ -8,11 +8,11 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.enums import UserRole
 from app.db.models import AppUser
-from app.db.session import SessionLocal
+from app.db.session import SessionLocal, set_tenant_context
 
 
 async def get_db() -> AsyncIterator[AsyncSession]:
-    """Yield an async DB session bound to the request lifecycle."""
+    """Yield an unscoped async DB session (admin/auth bootstrap; bypasses RLS)."""
     async with SessionLocal() as session:
         yield session
 
@@ -32,6 +32,25 @@ async def get_current_user(
     if user is None or not user.is_active:
         raise HTTPException(status.HTTP_401_UNAUTHORIZED, detail="User not found or inactive")
     return user
+
+
+async def get_tenant_db(
+    current: AppUser = Depends(get_current_user),
+) -> AsyncIterator[AsyncSession]:
+    """Yield an RLS-scoped session bound to the current user's tenant.
+
+    Wraps the request body in a single transaction so SET LOCAL ROLE + the
+    set_config('app.tenant_id', ...) call cover every query the handler runs.
+    Auto-commits on clean return; rolls back on exception.
+    """
+    async with SessionLocal() as session:
+        try:
+            await set_tenant_context(session, current.tenant_id)
+            yield session
+            await session.commit()
+        except Exception:
+            await session.rollback()
+            raise
 
 
 _ROLE_RANK: dict[UserRole, int] = {

@@ -1,8 +1,10 @@
-"""Async SQLAlchemy engine and request-scoped sessionmaker."""
+"""Async SQLAlchemy engine, sessionmaker, and tenant-context helpers."""
 
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
+from uuid import UUID
 
+from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 from app.settings.config import get_settings
@@ -24,3 +26,16 @@ async def session_scope() -> AsyncIterator[AsyncSession]:
         except Exception:
             await session.rollback()
             raise
+
+
+async def set_tenant_context(session: AsyncSession, tenant_id: UUID) -> None:
+    """Switch the active role to mas_app and stamp app.tenant_id for RLS.
+
+    Must be called inside an active transaction; SET LOCAL / set_config(..., true)
+    are transaction-scoped and revert at COMMIT/ROLLBACK.
+    """
+    await session.execute(text("SET LOCAL ROLE mas_app"))
+    await session.execute(
+        text("SELECT set_config('app.tenant_id', :tid, true)"),
+        {"tid": str(tenant_id)},
+    )

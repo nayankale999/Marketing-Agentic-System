@@ -566,11 +566,20 @@ CREATE TRIGGER personalisation_rule_set_updated_at BEFORE UPDATE ON personalisat
     FOR EACH ROW EXECUTE FUNCTION set_updated_at();
 
 -- =============================================================================
+-- ROW-LEVEL SECURITY (added by migration 0003)
+-- =============================================================================
+-- The app connects as a privileged user and, per request, executes:
+--    SET LOCAL ROLE mas_app;
+--    SELECT set_config('app.tenant_id', '<uuid>', true);
+-- Policies USING (tenant_id = current_setting('app.tenant_id', true)::uuid)
+-- mean an unset session var resolves to NULL and zero rows leak.
+-- See app/db/migrations/versions/0003_enable_rls.sql for the full DDL.
+
+-- =============================================================================
 -- DEPLOY NOTES
 -- =============================================================================
 -- 1. After running this file, run the following as a superuser to enforce append-only:
 --      REVOKE UPDATE, DELETE ON audit_log, agent_log, analytic_event FROM <app_role>;
--- 2. Row-level security (RLS) should be enabled per tenant on every domain table.
---    Policies are defined in a separate `rls.sql` (see E14-S04).
+-- 2. Row-level security (RLS) is enabled by migration 0003 (see above section).
 -- 3. Partition `analytic_event` by month once it exceeds ~50M rows.
 -- =============================================================================

@@ -1,0 +1,127 @@
+"""Python enums mirroring the PostgreSQL enums declared in `0001_initial_schema.sql`.
+
+Values must match the SQL exactly (string-compared by Postgres).
+"""
+
+import enum
+
+
+class UserRole(enum.StrEnum):
+    admin = "admin"
+    manager = "manager"
+    marketer = "marketer"
+    viewer = "viewer"
+
+
+class AgentKind(enum.StrEnum):
+    orchestrator = "orchestrator"
+    campaign_strategist = "campaign_strategist"
+    audience_targeting = "audience_targeting"
+    content_creator = "content_creator"
+    approval_orchestrator = "approval_orchestrator"
+    channel_distribution = "channel_distribution"
+    analytics_optimisation = "analytics_optimisation"
+
+
+class AgentStatus(enum.StrEnum):
+    idle = "idle"
+    busy = "busy"
+    degraded = "degraded"
+    disabled = "disabled"
+
+
+class CampaignStatus(enum.StrEnum):
+    drafted = "drafted"
+    audience_built = "audience_built"
+    strategy_set = "strategy_set"
+    content_in_production = "content_in_production"
+    approval_pending = "approval_pending"
+    ready_to_launch = "ready_to_launch"
+    live = "live"
+    optimising = "optimising"
+    paused = "paused"
+    completed = "completed"
+
+
+class CampaignType(enum.StrEnum):
+    awareness = "awareness"
+    lead_gen = "lead_gen"
+    demand_gen = "demand_gen"
+    nurture = "nurture"
+    product_launch = "product_launch"
+    event_promo = "event_promo"
+    retention = "retention"
+    reactivation = "reactivation"
+
+
+class ChannelPlatform(enum.StrEnum):
+    email = "email"
+    linkedin = "linkedin"
+    x = "x"
+    meta = "meta"
+    instagram = "instagram"
+    google_ads = "google_ads"
+    meta_ads = "meta_ads"
+    web = "web"
+    blog = "blog"
+    sms = "sms"
+
+
+class TaskStatus(enum.StrEnum):
+    queued = "queued"
+    running = "running"
+    succeeded = "succeeded"
+    failed = "failed"
+    cancelled = "cancelled"
+    awaiting_retry = "awaiting_retry"
+
+
+class AssetType(enum.StrEnum):
+    email = "email"
+    social_post = "social_post"
+    ad_creative = "ad_creative"
+    blog_post = "blog_post"
+    landing_page_copy = "landing_page_copy"
+    sms = "sms"
+    push = "push"
+
+
+class AssetStatus(enum.StrEnum):
+    requested = "requested"
+    generating = "generating"
+    drafted = "drafted"
+    pending_approval = "pending_approval"
+    approved = "approved"
+    rejected = "rejected"
+    scheduled = "scheduled"
+    published = "published"
+    failed = "failed"
+    measuring = "measuring"
+    variant_winner = "variant_winner"
+    archived = "archived"
+
+
+class AbTestStatus(enum.StrEnum):
+    designing = "designing"
+    running = "running"
+    significant = "significant"
+    inconclusive = "inconclusive"
+    stopped = "stopped"
+
+
+class ApprovalDecision(enum.StrEnum):
+    approved = "approved"
+    approved_with_edits = "approved_with_edits"
+    rejected = "rejected"
+
+
+class EventKind(enum.StrEnum):
+    impression = "impression"
+    click = "click"
+    open = "open"
+    reply = "reply"
+    conversion = "conversion"
+    unsubscribe = "unsubscribe"
+    bounce = "bounce"
+    spam_complaint = "spam_complaint"
+    spend = "spend"

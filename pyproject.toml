@@ -33,6 +33,8 @@ dev = [
     "ruff>=0.7",
     "mypy>=1.13",
     "pre-commit>=4.0",
+    "testcontainers[postgres]>=4.8",
+    "psycopg[binary]>=3.2",  # sync driver used by testcontainers' wait-for-ready check
 ]
 
 [build-system]

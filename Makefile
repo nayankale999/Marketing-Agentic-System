@@ -11,11 +11,11 @@ help:
 install: ## Install dependencies via uv
 	uv sync --all-extras
 
-infra: ## Start postgres, otel-collector, mailhog
-	docker compose up -d postgres otel-collector mailhog
+infra: ## Start postgres and mailpit (otel-collector re-enabled in W9)
+	docker compose up -d postgres mailpit
 
-app: ## Run FastAPI with reload on :8000
-	$(VENV)/uvicorn app.api.app:app --reload --host 0.0.0.0 --port 8000
+app: ## Run FastAPI with reload on :8001
+	$(VENV)/uvicorn app.api.app:app --reload --host 0.0.0.0 --port 8001
 
 dev: infra app ## Start infra + run the app
 

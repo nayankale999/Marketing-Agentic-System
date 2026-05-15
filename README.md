@@ -14,10 +14,12 @@ Prerequisites: Python 3.12, [uv](https://github.com/astral-sh/uv), Docker.
 
 ```bash
 make install   # uv sync --all-extras
-make dev       # docker compose up postgres+otel+mailhog, then uvicorn on :8000
+make dev       # docker compose up postgres + mailpit, then uvicorn on :8001
 make test      # pytest
 ```
 
-`curl localhost:8000/health` should return `{"status":"ok"}`.
+`curl localhost:8001/health` should return `{"status":"ok"}`.
+
+Ports: Postgres on **5434** (host) → 5432 (container), app on **8001** (defaults dodged because 5432/8000 are commonly taken).
 
 See `make help` for the full target list.

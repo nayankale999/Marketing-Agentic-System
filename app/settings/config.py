@@ -22,6 +22,9 @@ class Settings(BaseSettings):
     oidc_client_secret: str = "dev-secret"
     oidc_redirect_uri: str = "http://localhost:8001/api/auth/callback"
 
+    # Session cookie signing (override in prod via env)
+    session_secret: str = "dev-only-not-a-real-secret"
+
     # Anthropic
     anthropic_api_key: str = ""
 

@@ -164,13 +164,18 @@ CREATE TYPE event_kind AS ENUM (
 -- =============================================================================
 
 CREATE TABLE tenant (
-    id              UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
-    name            VARCHAR(200) NOT NULL,
-    domain          CITEXT      UNIQUE,
-    plan            VARCHAR(50) NOT NULL DEFAULT 'standard',
-    created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    updated_at      TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    id                  UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
+    name                VARCHAR(200) NOT NULL,
+    domain              CITEXT      UNIQUE,
+    oidc_hosted_domain  CITEXT,     -- matched against the OIDC `hd` claim
+    plan                VARCHAR(50) NOT NULL DEFAULT 'standard',
+    created_at          TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at          TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
+
+CREATE UNIQUE INDEX idx_tenant_oidc_hosted_domain
+    ON tenant (oidc_hosted_domain)
+    WHERE oidc_hosted_domain IS NOT NULL;
 
 CREATE TRIGGER tenant_set_updated_at BEFORE UPDATE ON tenant
     FOR EACH ROW EXECUTE FUNCTION set_updated_at();

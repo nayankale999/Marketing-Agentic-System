@@ -578,8 +578,10 @@ CREATE TRIGGER personalisation_rule_set_updated_at BEFORE UPDATE ON personalisat
 -- =============================================================================
 -- DEPLOY NOTES
 -- =============================================================================
--- 1. After running this file, run the following as a superuser to enforce append-only:
---      REVOKE UPDATE, DELETE ON audit_log, agent_log, analytic_event FROM <app_role>;
+-- 1. Migration 0004 REVOKEs UPDATE, DELETE on audit_log + agent_log from
+--    mas_app, enforcing append-only at the role level.
 -- 2. Row-level security (RLS) is enabled by migration 0003 (see above section).
--- 3. Partition `analytic_event` by month once it exceeds ~50M rows.
+-- 3. analytic_event will get the same REVOKE in a later migration once events
+--    start flowing (Slice 4+). Append-only at scale should be partitioned.
+-- 4. Partition `analytic_event` by month once it exceeds ~50M rows.
 -- =============================================================================

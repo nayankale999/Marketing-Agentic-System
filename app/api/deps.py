@@ -6,6 +6,7 @@ from uuid import UUID
 from fastapi import Depends, HTTPException, Request, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.audit.context import current_actor_id, current_actor_kind
 from app.db.enums import UserRole
 from app.db.models import AppUser
 from app.db.session import SessionLocal, set_tenant_context
@@ -31,6 +32,10 @@ async def get_current_user(
     user = await db.get(AppUser, UUID(user_id_str))
     if user is None or not user.is_active:
         raise HTTPException(status.HTTP_401_UNAUTHORIZED, detail="User not found or inactive")
+    # Tag downstream audit writes with this user. Contextvars are per-task,
+    # so this only affects the in-flight request.
+    current_actor_kind.set("user")
+    current_actor_id.set(user.id)
     return user
 
 

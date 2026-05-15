@@ -4,10 +4,12 @@ from fastapi import FastAPI
 from starlette.middleware.sessions import SessionMiddleware
 
 from app.api import _protected, auth, health, me
+from app.audit import register_listeners
 from app.settings.config import get_settings
 
 
 def create_app() -> FastAPI:
+    register_listeners()
     settings = get_settings()
     application = FastAPI(title="Marketing Agentic System", version="0.0.1")
     application.add_middleware(SessionMiddleware, secret_key=settings.session_secret)

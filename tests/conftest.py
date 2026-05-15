@@ -17,6 +17,9 @@ from sqlalchemy.ext.asyncio import (
 from testcontainers.postgres import PostgresContainer
 
 from app.api.app import app
+from app.audit import register_listeners
+
+register_listeners()
 
 
 @pytest.fixture

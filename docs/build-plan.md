@@ -56,7 +56,8 @@ Tasks:
 **Implements:** E14-S01, E14-S02.
 
 Tasks:
-- Local OIDC: use `authlib` + a mock IdP container (`oidc-mock`) for dev; design for plug-in real IdP via env.
+- `authlib` OIDC client wired against `oidc-mock` for dev; env-switchable to Google Workspace (`https://accounts.google.com/.well-known/openid-configuration`).
+- Tenant config table extension: `tenant.oidc_hosted_domain` (e.g. `itutitech.com`). Login rejects if the Google `hd` claim doesn't match.
 - `app/api/auth.py`: session middleware reading the OIDC ID token, populating `request.state.user`.
 - `app/api/deps.py`: `require_role(role)` FastAPI dependency.
 - `app/api/me.py`: `GET /api/me` returning the current user + role.
@@ -255,15 +256,18 @@ These don't get a slice of their own — they ride along with whatever epic exer
 
 ---
 
-## Decisions to lock before Slice 1 starts
+## Locked decisions
 
-These are deferred until you say "let's scaffold":
+Decided 2026-05-15 before Slice 1:
 
-1. **Package manager:** `uv` (fast, modern) vs `poetry` (familiar). Default: `uv`.
-2. **IdP for dev + prod:** `oidc-mock` for dev is fine; the prod IdP (Google Workspace? Microsoft? Auth0?) needs to be picked before W3.
-3. **Frontend framework:** Slice 4 introduces UI. Options: Next.js (full stack TS app talking to FastAPI), HTMX + Jinja (simpler, server-rendered), Streamlit (fastest but limited). Default for solo: HTMX + Jinja for MVP, swap to Next.js if you want a richer UI later.
-4. **Hosting target:** local-only until a slice exits demoable. After Slice 1, decide: Fly.io / Railway / Render (single-tenant indie) vs AWS (production aspirations).
-5. **Email provider for the first integration:** SendGrid / Postmark / SES — pick before W27.
+1. **Package manager:** `uv` (Astral). `pyproject.toml` + `uv.lock` checked into the repo. `uv sync`, `uv run`, `uv add` are the daily commands.
+2. **Identity provider:** **Google Workspace** in prod. Dev uses `oidc-mock` (no live IdP calls in test). Prod OIDC discovery URL: `https://accounts.google.com/.well-known/openid-configuration`. We pin the `hd` (hosted domain) claim per tenant so a user's Google email domain must match the tenant's domain.
+3. **Frontend framework:** **HTMX + Jinja**, server-rendered from FastAPI. No separate frontend build for MVP. If UI complexity outgrows HTMX in Slice 4 or 5, we revisit (Next.js as the swap target).
+4. **Hosting target:** **Local-only for now.** Slice 1 runs against `docker-compose` on the dev machine. We pick a deploy target (Fly.io / Railway / Render / AWS) at the end of Slice 1 once we have something worth hosting.
+
+Still deferred:
+
+5. **Email provider for the first integration:** SendGrid / Postmark / SES — pick before W27 (Slice 4). Doesn't bite until then.
 
 ---
 

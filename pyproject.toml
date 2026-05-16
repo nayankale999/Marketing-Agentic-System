@@ -57,6 +57,7 @@ ignore = ["E501"]
 [tool.ruff.lint.flake8-bugbear]
 # FastAPI's idiomatic `def handler(x: T = Depends(...))` is fine — these calls
 # are evaluated once at route registration, not on every request.
+# `require_role` is our own dep factory; the returned closure is the actual dep.
 extend-immutable-calls = [
     "fastapi.Depends",
     "fastapi.Query",
@@ -66,6 +67,7 @@ extend-immutable-calls = [
     "fastapi.Cookie",
     "fastapi.Form",
     "fastapi.File",
+    "app.api.deps.require_role",
 ]
 
 [tool.ruff.format]

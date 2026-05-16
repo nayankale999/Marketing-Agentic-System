@@ -23,21 +23,27 @@ services:
       - "1025:1025"  # SMTP
       - "8025:8025"  # web UI
 
-  # otel-collector is disabled until W9. The Docker daemon rejects bind mounts
-  # whose source path contains ':' (this repo lives under a dir with '15:16'
-  # in the name). When W9 wires up OTel we'll switch to a custom image that
-  # bakes the config in via Dockerfile COPY:
-  #
-  #   infra/otel-collector/Dockerfile:
-  #     FROM otel/opentelemetry-collector-contrib:0.110.0
-  #     COPY otel-collector-config.yaml /etc/otelcol-contrib/config.yaml
-  #
-  # otel-collector:
-  #   build: ./infra/otel-collector
-  #   container_name: mas-otel
-  #   ports:
-  #     - "4317:4317"
-  #     - "4318:4318"
+  # OTel collector. Built from infra/otel-collector/Dockerfile so the config
+  # is baked into the image — bind mounts fail because the repo path
+  # contains ':' (`(21-04-2026 15:16)`), which Docker's volume parser rejects.
+  otel-collector:
+    build:
+      context: ./infra/otel-collector
+    container_name: mas-otel
+    ports:
+      - "4317:4317"  # OTLP gRPC
+      - "4318:4318"  # OTLP HTTP
+
+  # Mock OIDC provider for local dev. Issues tokens with email/name/hd
+  # claims matching the seeded `acme.test` tenant.
+  oidc-mock:
+    build:
+      context: ./infra/oidc-mock
+    container_name: mas-oidc-mock
+    ports:
+      - "9000:8080"
+    environment:
+      SERVER_PORT: "8080"
 
 volumes:
   mas-pgdata:

@@ -16,8 +16,9 @@ class Settings(BaseSettings):
     # Database
     database_url: str = "postgresql+asyncpg://mas:mas@localhost:5434/mas"
 
-    # OIDC (dev defaults; override via env in prod)
-    oidc_issuer: str = "http://localhost:9000"
+    # OIDC (dev defaults point at the local mock-oauth2-server at /default;
+    # override via env for Google Workspace in prod)
+    oidc_issuer: str = "http://localhost:9000/default"
     oidc_client_id: str = "mas-dev"
     oidc_client_secret: str = "dev-secret"
     oidc_redirect_uri: str = "http://localhost:8001/api/auth/callback"

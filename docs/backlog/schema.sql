@@ -339,6 +339,11 @@ CREATE TABLE task (
     priority        SMALLINT    NOT NULL DEFAULT 5 CHECK (priority BETWEEN 1 AND 10),
     attempt         SMALLINT    NOT NULL DEFAULT 0,
     max_attempts    SMALLINT    NOT NULL DEFAULT 3,
+    -- Per-tenant idempotency; partial unique index added by migration 0005.
+    idempotency_key VARCHAR(200),
+    -- Lease columns set on claim; reaper resets to NULL on expiry (migration 0005).
+    leased_until    TIMESTAMPTZ,
+    worker_id       VARCHAR(100),
     -- input_data / output_data JSONB: agent-specific payload schemas, validated in app code
     input_data      JSONB       NOT NULL DEFAULT '{}'::jsonb,
     output_data     JSONB       NOT NULL DEFAULT '{}'::jsonb,
@@ -349,6 +354,13 @@ CREATE TABLE task (
     created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     updated_at      TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
+
+CREATE UNIQUE INDEX idx_task_idempotency
+    ON task (tenant_id, idempotency_key)
+    WHERE idempotency_key IS NOT NULL;
+CREATE INDEX idx_task_leased_until
+    ON task (leased_until)
+    WHERE status = 'running' AND leased_until IS NOT NULL;
 
 CREATE TRIGGER task_set_updated_at BEFORE UPDATE ON task
     FOR EACH ROW EXECUTE FUNCTION set_updated_at();

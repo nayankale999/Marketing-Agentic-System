@@ -204,6 +204,11 @@ class Task(Base):
     priority: Mapped[int] = mapped_column(SmallInteger, nullable=False, server_default="5")
     attempt: Mapped[int] = mapped_column(SmallInteger, nullable=False, server_default="0")
     max_attempts: Mapped[int] = mapped_column(SmallInteger, nullable=False, server_default="3")
+    # Per-tenant idempotency key; partial unique index in migration 0005.
+    idempotency_key: Mapped[str | None] = mapped_column(String(200))
+    # Set on claim; the reaper resets these to NULL on expiry.
+    leased_until: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    worker_id: Mapped[str | None] = mapped_column(String(100))
     input_data: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False, server_default="{}")
     output_data: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False, server_default="{}")
     error_message: Mapped[str | None] = mapped_column(Text)

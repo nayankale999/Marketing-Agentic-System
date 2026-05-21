@@ -16,6 +16,7 @@ from sqlalchemy import (
     Date,
     DateTime,
     ForeignKey,
+    Integer,
     LargeBinary,
     Numeric,
     SmallInteger,
@@ -341,5 +342,57 @@ class IntegrationCredential(Base):
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )
     updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+
+class Audience(Base):
+    """A targeted set of contacts attached to a campaign.
+
+    `segment_criteria` carries the rule set for ICP-driven audiences (Slice 2
+    work units E04 onward); for CSV-uploaded "seed" audiences (E01-S02) we
+    record `{"source": "csv", "filename": "...", "uploaded_at": "..."}` and
+    the members live in `audience_member`.
+    """
+
+    __tablename__ = "audience"
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, server_default=func.gen_random_uuid()
+    )
+    tenant_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("tenant.id", ondelete="CASCADE"), nullable=False
+    )
+    campaign_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("campaign.id", ondelete="CASCADE"), nullable=False
+    )
+    name: Mapped[str] = mapped_column(String(200), nullable=False)
+    segment_criteria: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
+    estimated_size: Mapped[int | None] = mapped_column(Integer)
+    actual_size: Mapped[int | None] = mapped_column(Integer)
+    refreshed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+
+class AudienceMember(Base):
+    """One contact materialised into an audience. Composite PK
+    `(audience_id, external_id)` — external_id is normally the lowercased
+    email for CSV uploads, CRM contact id for synced sources."""
+
+    __tablename__ = "audience_member"
+
+    audience_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("audience.id", ondelete="CASCADE"),
+        primary_key=True,
+    )
+    external_id: Mapped[str] = mapped_column(String(200), primary_key=True)
+    payload: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False, server_default="{}")
+    added_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )

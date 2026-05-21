@@ -22,6 +22,7 @@ from app.audit.writer import column_snapshot
 from app.db.models import (
     Agent,
     AppUser,
+    Audience,
     AuditLog,
     Campaign,
     IntegrationCredential,
@@ -72,6 +73,10 @@ def register() -> None:
         (AppUser, "app_user", lambda t: t.tenant_id, frozenset()),
         (Agent, "agent", lambda t: t.tenant_id, frozenset()),
         (Campaign, "campaign", lambda t: t.tenant_id, frozenset()),
+        # Per-row audience_member inserts are intentionally not audited --
+        # uploads of thousands of contacts would swamp audit_log. The parent
+        # `audience` row carries the provenance (source, filename, uploader).
+        (Audience, "audience", lambda t: t.tenant_id, frozenset()),
         # Never let the encrypted token blob into audit_log -- the whole point
         # of the encryption layer is that nothing else holds the ciphertext.
         (

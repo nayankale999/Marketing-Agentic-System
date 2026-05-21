@@ -34,8 +34,11 @@ services:
       - "4317:4317"  # OTLP gRPC
       - "4318:4318"  # OTLP HTTP
 
-  # Mock OIDC provider for local dev. Issues tokens with email/name/hd
+  # Mock OIDC provider for local dev. Issues tokens with sub/email/name/hd
   # claims matching the seeded `acme.test` tenant.
+  # JSON_CONFIG is the value (not a path) — mock-oauth2-server reads it on
+  # startup. The Dockerfile's JSON_CONFIG_PATH isn't actually used by this
+  # upstream image; the inline JSON_CONFIG here is what takes effect.
   oidc-mock:
     build:
       context: ./infra/oidc-mock
@@ -44,6 +47,29 @@ services:
       - "9000:8080"
     environment:
       SERVER_PORT: "8080"
+      JSON_CONFIG: |
+        {
+          "interactiveLogin": false,
+          "httpServer": "NettyWrapper",
+          "tokenCallbacks": [
+            {
+              "issuerId": "default",
+              "tokenExpiry": 3600,
+              "requestMappings": [
+                {
+                  "requestParam": "scope",
+                  "match": "openid",
+                  "claims": {
+                    "sub": "demo-marketer-001",
+                    "email": "marketer@acme.test",
+                    "name": "Demo Marketer",
+                    "hd": "acme.test"
+                  }
+                }
+              ]
+            }
+          ]
+        }
 
 volumes:
   mas-pgdata:

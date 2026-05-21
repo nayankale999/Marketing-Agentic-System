@@ -1,5 +1,5 @@
 {
-  "interactiveLogin": true,
+  "interactiveLogin": false,
   "httpServer": "NettyWrapper",
   "tokenCallbacks": [
     {
@@ -10,6 +10,7 @@
           "requestParam": "scope",
           "match": "openid",
           "claims": {
+            "sub": "demo-marketer-001",
             "email": "marketer@acme.test",
             "name": "Demo Marketer",
             "hd": "acme.test"

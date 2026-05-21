@@ -58,23 +58,31 @@ async def reset_demo_state() -> None:
     async with SessionLocal() as session, session.begin():
         await session.execute(text("DELETE FROM agent_log WHERE task_id IS NOT NULL"))
         await session.execute(
-            text("DELETE FROM task WHERE campaign_id IN "
-                 "(SELECT id FROM campaign WHERE name LIKE 'e2e-%')")
+            text(
+                "DELETE FROM task WHERE campaign_id IN "
+                "(SELECT id FROM campaign WHERE name LIKE 'e2e-%')"
+            )
         )
         await session.execute(text("DELETE FROM campaign WHERE name LIKE 'e2e-%'"))
         await session.execute(
-            text("DELETE FROM agent WHERE tenant_id IN "
-                 "(SELECT id FROM tenant WHERE oidc_hosted_domain = :d)"),
+            text(
+                "DELETE FROM agent WHERE tenant_id IN "
+                "(SELECT id FROM tenant WHERE oidc_hosted_domain = :d)"
+            ),
             {"d": DOMAIN},
         )
         await session.execute(
-            text("DELETE FROM app_user WHERE tenant_id IN "
-                 "(SELECT id FROM tenant WHERE oidc_hosted_domain = :d)"),
+            text(
+                "DELETE FROM app_user WHERE tenant_id IN "
+                "(SELECT id FROM tenant WHERE oidc_hosted_domain = :d)"
+            ),
             {"d": DOMAIN},
         )
         await session.execute(
-            text("DELETE FROM audit_log WHERE tenant_id IN "
-                 "(SELECT id FROM tenant WHERE oidc_hosted_domain = :d)"),
+            text(
+                "DELETE FROM audit_log WHERE tenant_id IN "
+                "(SELECT id FROM tenant WHERE oidc_hosted_domain = :d)"
+            ),
             {"d": DOMAIN},
         )
         await session.execute(
@@ -115,9 +123,7 @@ async def promote_user_to_marketer(user_id: uuid.UUID) -> None:
 
 
 def otel_span_count() -> int:
-    result = subprocess.run(
-        ["docker", "logs", "mas-otel"], capture_output=True, text=True
-    )
+    result = subprocess.run(["docker", "logs", "mas-otel"], capture_output=True, text=True)
     return result.stdout.count("Span #") + result.stderr.count("Span #")
 
 
@@ -128,7 +134,7 @@ async def main() -> None:
 
     heading("Slice 1 end-to-end demo")
     print(f"App:      {APP_BASE}")
-    print(f"OIDC:     http://localhost:9000/default")
+    print("OIDC:     http://localhost:9000/default")
     print(f"DB:       {engine.url}")
     print(f"Domain:   {DOMAIN}")
 
@@ -142,9 +148,7 @@ async def main() -> None:
     print(f"  collector span count (before): {spans_before}")
 
     heading("2. Full OIDC handshake via oidc-mock (no browser)")
-    async with httpx.AsyncClient(
-        base_url=APP_BASE, follow_redirects=True, timeout=10.0
-    ) as client:
+    async with httpx.AsyncClient(base_url=APP_BASE, follow_redirects=True, timeout=10.0) as client:
         login = await client.get("/api/auth/login")
         print(f"  /api/auth/login -> final {login.status_code} at {login.url.path}")
         if login.status_code != 200:
@@ -171,9 +175,7 @@ async def main() -> None:
         assert ok.status_code == 200
 
         heading("5. POST /api/campaigns/{id}/transitions/echo_step")
-        resp = await client.post(
-            f"/api/campaigns/{campaign_id}/transitions/echo_step"
-        )
+        resp = await client.post(f"/api/campaigns/{campaign_id}/transitions/echo_step")
         print(f"  status: {resp.status_code}, body: {resp.json()}")
         assert resp.status_code == 200
 
@@ -183,11 +185,7 @@ async def main() -> None:
     while time.monotonic() < deadline:
         async with SessionLocal() as session:
             tasks = (
-                (
-                    await session.execute(
-                        select(Task).where(Task.campaign_id == campaign_id)
-                    )
-                )
+                (await session.execute(select(Task).where(Task.campaign_id == campaign_id)))
                 .scalars()
                 .all()
             )
@@ -205,9 +203,7 @@ async def main() -> None:
         rows = (
             (
                 await session.execute(
-                    select(Task)
-                    .where(Task.campaign_id == campaign_id)
-                    .order_by(Task.created_at)
+                    select(Task).where(Task.campaign_id == campaign_id).order_by(Task.created_at)
                 )
             )
             .scalars()

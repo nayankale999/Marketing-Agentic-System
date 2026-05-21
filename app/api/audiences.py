@@ -21,8 +21,16 @@ from app.api.schemas.audience import (
     CsvRowErrorOut,
     CsvUploadResponse,
     CsvUploadSummary,
+    EstimateResponse,
+    SegmentationCriteriaIn,
 )
 from app.audiences.csv_upload import parse_csv
+from app.audiences.segmentation import (
+    SegmentationError,
+)
+from app.audiences.segmentation import (
+    estimate as segmentation_estimate,
+)
 from app.db.enums import TaskStatus, UserRole
 from app.db.models import AppUser, Audience, AudienceMember, Campaign, Task
 from app.orchestrator.state_machine import _ensure_orchestrator_agent
@@ -166,6 +174,38 @@ async def upload_audience_csv(
         ),
         errors=errors_out,
         errors_truncated=truncated,
+    )
+
+
+@audiences_router.post("/estimate", response_model=EstimateResponse)
+async def estimate_audience(
+    body: SegmentationCriteriaIn,
+    user: AppUser = Depends(require_role(UserRole.marketer)),
+    db: AsyncSession = Depends(get_tenant_db),
+) -> EstimateResponse:
+    """E11-S04 — return how many tenant-wide contacts match the criteria,
+    without persisting anything. Use before materialising a real audience.
+    """
+    try:
+        result = await segmentation_estimate(
+            db,
+            tenant_id=user.tenant_id,
+            criteria=body.model_dump(),
+        )
+    except SegmentationError as exc:
+        raise HTTPException(
+            status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail={
+                "message": str(exc),
+                "section": exc.section,
+                "index": exc.index,
+            },
+        ) from exc
+
+    return EstimateResponse(
+        total_reachable=result.total_reachable,
+        suppressed=result.suppressed,
+        net=result.net,
     )
 
 

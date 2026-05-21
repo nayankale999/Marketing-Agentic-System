@@ -58,3 +58,28 @@ class AudienceDetail(AudienceOut):
     """Audience info + the freshness summary."""
 
     freshness: AudienceFreshness
+
+
+class SegmentationRuleIn(BaseModel):
+    """One rule in a segmentation criteria payload."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    field: str
+    op: str
+    value: Any
+
+
+class SegmentationCriteriaIn(BaseModel):
+    """Input shape for /api/audiences/estimate (and the future build call)."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    include: list[SegmentationRuleIn] = []
+    exclude: list[SegmentationRuleIn] = []
+
+
+class EstimateResponse(BaseModel):
+    total_reachable: int
+    suppressed: int
+    net: int

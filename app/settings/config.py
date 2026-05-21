@@ -36,6 +36,10 @@ class Settings(BaseSettings):
     hubspot_client_secret: str = ""
     hubspot_redirect_uri: str = "http://localhost:8001/api/integrations/hubspot/callback"
 
+    # Plausible Analytics (web analytics connector — W16)
+    plausible_api_key: str = ""
+    plausible_site_id: str = ""
+
     # Anthropic
     anthropic_api_key: str = ""
 

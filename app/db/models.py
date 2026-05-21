@@ -36,6 +36,7 @@ from app.db.enums import (
     CampaignStatus,
     CampaignType,
     ChannelPlatform,
+    EventKind,
     TaskStatus,
     UserRole,
 )
@@ -81,6 +82,12 @@ _TASK_STATUS = PgEnum(
 _CHANNEL_PLATFORM = PgEnum(
     ChannelPlatform,
     name="channel_platform",
+    create_type=False,
+    values_callable=lambda e: [m.value for m in e],
+)
+_EVENT_KIND = PgEnum(
+    EventKind,
+    name="event_kind",
     create_type=False,
     values_callable=lambda e: [m.value for m in e],
 )
@@ -400,5 +407,38 @@ class AudienceMember(Base):
     source: Mapped[str | None] = mapped_column(String(20))
     fetched_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     added_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+
+class AnalyticEvent(Base):
+    """One metric snapshot from a web analytics / ads / email provider.
+
+    `provider_event_id` (added in migration 0008) is the dedup key — a
+    composite the connector builds out of (provider, scope, period, dim).
+    `campaign_id` is nullable for unattributed events (UTM that doesn't
+    match any campaign). The raw provider payload (utm_*, country, etc.)
+    lands in `payload` so we can re-attribute later if rules change.
+    """
+
+    __tablename__ = "analytic_event"
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, server_default=func.gen_random_uuid()
+    )
+    tenant_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("tenant.id", ondelete="RESTRICT"), nullable=False
+    )
+    campaign_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("campaign.id", ondelete="RESTRICT")
+    )
+    channel_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("channel.id", ondelete="SET NULL")
+    )
+    event_type: Mapped[EventKind] = mapped_column(_EVENT_KIND, nullable=False)
+    metric_value: Mapped[Decimal | None] = mapped_column(Numeric(18, 4))
+    payload: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False, server_default="{}")
+    provider_event_id: Mapped[str | None] = mapped_column(String(200))
+    event_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )

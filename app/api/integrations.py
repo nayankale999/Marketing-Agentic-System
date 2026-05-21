@@ -18,13 +18,20 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import get_tenant_db, require_role
-from app.api.schemas.integration import HubSpotTestResponse, IntegrationStatus
+from app.api.schemas.integration import (
+    HubSpotTestResponse,
+    IntegrationStatus,
+    PlausibleSyncRequest,
+    PlausibleSyncResponse,
+)
 from app.audit.context import current_actor_id, current_actor_kind
 from app.audit.writer import write_audit
 from app.db.enums import UserRole
 from app.db.models import AppUser, IntegrationCredential
 from app.integrations.credentials import get_encrypted_payload
 from app.integrations.hubspot import HubSpotConnector
+from app.integrations.web_analytics.ingest import ingest_events
+from app.integrations.web_analytics.plausible import PlausibleConnector
 from app.settings.config import get_settings
 
 router = APIRouter(prefix="/api/integrations", tags=["integrations"])
@@ -199,4 +206,39 @@ async def hubspot_test(
         count=len(contacts),
         sample=[{"id": c.external_id, "properties": dict(c.properties)} for c in contacts[:3]],
         next_after=next_after,
+    )
+
+
+@router.post("/plausible/sync", response_model=PlausibleSyncResponse)
+async def plausible_sync(
+    body: PlausibleSyncRequest | None = None,
+    user: AppUser = Depends(require_role(UserRole.admin)),
+    db: AsyncSession = Depends(get_tenant_db),
+) -> PlausibleSyncResponse:
+    """E12-S05 / E01-S04 — fetch web analytics for the last N days, dedup +
+    attribute via UTM, persist into analytic_event."""
+    settings = get_settings()
+    if not settings.plausible_api_key or not settings.plausible_site_id:
+        raise HTTPException(
+            status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Plausible is not configured (PLAUSIBLE_API_KEY + PLAUSIBLE_SITE_ID)",
+        )
+
+    days = body.days if body is not None else 7
+    until = datetime.now(UTC)
+    since = until - timedelta(days=days)
+
+    connector = PlausibleConnector(
+        api_key=settings.plausible_api_key, site_id=settings.plausible_site_id
+    )
+    events = await connector.fetch_events(since=since, until=until)
+    summary = await ingest_events(db, tenant_id=user.tenant_id, events=events)
+
+    return PlausibleSyncResponse(
+        fetched=len(events),
+        imported=summary.imported,
+        duplicates=summary.duplicates,
+        unattributed=summary.unattributed,
+        window_start=since,
+        window_end=until,
     )

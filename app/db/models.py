@@ -382,7 +382,11 @@ class Audience(Base):
 class AudienceMember(Base):
     """One contact materialised into an audience. Composite PK
     `(audience_id, external_id)` — external_id is normally the lowercased
-    email for CSV uploads, CRM contact id for synced sources."""
+    email for CSV uploads, CRM contact id for synced sources.
+
+    `source` + `fetched_at` provenance (E01-S05) are nullable to accommodate
+    rows that predate migration 0007; all new inserts set both.
+    """
 
     __tablename__ = "audience_member"
 
@@ -393,6 +397,8 @@ class AudienceMember(Base):
     )
     external_id: Mapped[str] = mapped_column(String(200), primary_key=True)
     payload: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False, server_default="{}")
+    source: Mapped[str | None] = mapped_column(String(20))
+    fetched_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     added_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )

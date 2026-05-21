@@ -43,6 +43,10 @@ class Settings(BaseSettings):
     otel_exporter_otlp_endpoint: str = "http://localhost:4317"
     otel_service_name: str = "mas-api"
 
+    # Audience member freshness window (E01-S05). Members whose `fetched_at`
+    # is older than this are flagged stale in the audience composition view.
+    audience_member_freshness_ttl_days: int = 30
+
 
 @lru_cache(maxsize=1)
 def get_settings() -> Settings:

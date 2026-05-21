@@ -44,3 +44,17 @@ class AudienceOut(BaseModel):
     refreshed_at: datetime | None
     created_at: datetime
     updated_at: datetime
+
+
+class AudienceFreshness(BaseModel):
+    """Per-audience freshness summary (E01-S05)."""
+
+    member_count: int
+    stale_member_count: int
+    ttl_days: int
+
+
+class AudienceDetail(AudienceOut):
+    """Audience info + the freshness summary."""
+
+    freshness: AudienceFreshness

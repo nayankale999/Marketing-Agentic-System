@@ -208,6 +208,44 @@ async def test_ingest_empty_list_is_noop(
     assert summary.duplicates == 0
 
 
+async def test_ingest_event_with_no_utm_counts_as_unattributed(
+    db_engine: AsyncEngine, seeded: tuple[uuid.UUID, uuid.UUID, AppUser]
+) -> None:
+    """An event with utm_campaign=None has no chance of being attributed —
+    it goes into the unattributed bucket too, not just the 'tried-and-missed'
+    case. This counts ALL traffic with campaign_id NULL."""
+    tenant_id, _, _ = seeded
+    async with AsyncSession(db_engine, expire_on_commit=False) as session, session.begin():
+        summary = await ingest_events(
+            session,
+            tenant_id=tenant_id,
+            events=[
+                _make_event(pid="ev-utm-match", utm="Spring Launch"),
+                _make_event(pid="ev-utm-miss", utm="Ghost Promo"),
+                _make_event(pid="ev-no-utm", utm=None),
+            ],
+        )
+    assert summary.imported == 3
+    # 1 matched + 2 not-pinned-to-campaign (miss + no-utm).
+    assert summary.unattributed == 2
+
+    async with AsyncSession(db_engine, expire_on_commit=False) as session:
+        null_campaign_count = (
+            await session.execute(
+                select(func.count())
+                .select_from(AnalyticEvent)
+                .where(
+                    AnalyticEvent.tenant_id == tenant_id,
+                    AnalyticEvent.provider_event_id.in_(
+                        ["ev-utm-match", "ev-utm-miss", "ev-no-utm"]
+                    ),
+                    AnalyticEvent.campaign_id.is_(None),
+                )
+            )
+        ).scalar_one()
+    assert null_campaign_count == 2  # matches the summary
+
+
 # ---------------------------------------------------------------------------
 # PlausibleConnector (respx-mocked)
 # ---------------------------------------------------------------------------
@@ -307,6 +345,49 @@ async def test_sync_endpoint_fetches_and_persists(
             .all()
         )
     assert {r.campaign_id for r in rows} == {campaign_id}
+
+
+@respx.mock
+async def test_sync_endpoint_writes_ingest_task_row(
+    admin_client: httpx.AsyncClient,
+    seeded: tuple[uuid.UUID, uuid.UUID, AppUser],
+    db_engine: AsyncEngine,
+) -> None:
+    """The sync handler writes an `ingest.web_analytics.plausible` task so it
+    surfaces in `GET /api/ingest/jobs` alongside CSV uploads."""
+    tenant_id, _, _ = seeded
+    respx.get("https://plausible.io/api/v1/stats/breakdown").mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "results": [
+                    {"visit:utm_campaign": "Spring Launch", "pageviews": 1, "visitors": 1},
+                ]
+            },
+        )
+    )
+    await admin_client.post("/api/integrations/plausible/sync", json={"days": 2})
+
+    from app.db.models import Task
+
+    async with AsyncSession(db_engine, expire_on_commit=False) as session:
+        task = (
+            await session.execute(
+                select(Task).where(
+                    Task.tenant_id == tenant_id,
+                    Task.skill_name == "ingest.web_analytics.plausible",
+                )
+            )
+        ).scalar_one()
+    assert task.status.value == "succeeded"
+    assert task.input_data["days"] == 2
+    assert task.input_data["site_id"] == "acme.test"
+    assert task.output_data["imported"] == 2  # pageviews + visitors
+
+    # Also visible via the operator dashboard.
+    jobs = (await admin_client.get("/api/ingest/jobs")).json()
+    skills = [item["skill_name"] for item in jobs["items"]]
+    assert "ingest.web_analytics.plausible" in skills
 
 
 @respx.mock

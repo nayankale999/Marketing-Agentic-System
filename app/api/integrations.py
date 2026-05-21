@@ -26,12 +26,13 @@ from app.api.schemas.integration import (
 )
 from app.audit.context import current_actor_id, current_actor_kind
 from app.audit.writer import write_audit
-from app.db.enums import UserRole
-from app.db.models import AppUser, IntegrationCredential
+from app.db.enums import TaskStatus, UserRole
+from app.db.models import AppUser, IntegrationCredential, Task
 from app.integrations.credentials import get_encrypted_payload
 from app.integrations.hubspot import HubSpotConnector
 from app.integrations.web_analytics.ingest import ingest_events
 from app.integrations.web_analytics.plausible import PlausibleConnector
+from app.orchestrator.state_machine import _ensure_orchestrator_agent
 from app.settings.config import get_settings
 
 router = APIRouter(prefix="/api/integrations", tags=["integrations"])
@@ -216,7 +217,9 @@ async def plausible_sync(
     db: AsyncSession = Depends(get_tenant_db),
 ) -> PlausibleSyncResponse:
     """E12-S05 / E01-S04 — fetch web analytics for the last N days, dedup +
-    attribute via UTM, persist into analytic_event."""
+    attribute via UTM, persist into analytic_event. Writes an
+    `ingest.web_analytics.plausible` task row so the run shows up in the
+    `GET /api/ingest/jobs` operator dashboard alongside CSV uploads."""
     settings = get_settings()
     if not settings.plausible_api_key or not settings.plausible_site_id:
         raise HTTPException(
@@ -227,12 +230,42 @@ async def plausible_sync(
     days = body.days if body is not None else 7
     until = datetime.now(UTC)
     since = until - timedelta(days=days)
+    started_at = datetime.now(UTC)
 
     connector = PlausibleConnector(
         api_key=settings.plausible_api_key, site_id=settings.plausible_site_id
     )
     events = await connector.fetch_events(since=since, until=until)
     summary = await ingest_events(db, tenant_id=user.tenant_id, events=events)
+    completed_at = datetime.now(UTC)
+
+    # Operator dashboard breadcrumb. Parallel to the CSV upload pattern.
+    agent = await _ensure_orchestrator_agent(db, user.tenant_id)
+    db.add(
+        Task(
+            tenant_id=user.tenant_id,
+            agent_id=agent.id,
+            skill_name="ingest.web_analytics.plausible",
+            status=TaskStatus.succeeded,
+            attempt=1,
+            input_data={
+                "days": days,
+                "window_start": since.isoformat(),
+                "window_end": until.isoformat(),
+                "site_id": settings.plausible_site_id,
+            },
+            output_data={
+                "fetched": len(events),
+                "imported": summary.imported,
+                "duplicates": summary.duplicates,
+                "unattributed": summary.unattributed,
+            },
+            scheduled_for=started_at,
+            started_at=started_at,
+            completed_at=completed_at,
+        )
+    )
+    await db.flush()
 
     return PlausibleSyncResponse(
         fetched=len(events),

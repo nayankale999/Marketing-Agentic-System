@@ -26,7 +26,7 @@ Prereq: docker compose stack up + `alembic upgrade head`.
 import asyncio
 import json
 import uuid
-from datetime import UTC, date, datetime, timedelta
+from datetime import date, timedelta
 
 import httpx
 import respx
@@ -71,54 +71,61 @@ async def reset_demo_state() -> None:
     """Erase prior runs so re-running is idempotent."""
     async with SessionLocal() as session, session.begin():
         await session.execute(
-            text("DELETE FROM agent_log WHERE tenant_id IN "
-                 "(SELECT id FROM tenant WHERE name = :name)"),
+            text(
+                "DELETE FROM agent_log WHERE tenant_id IN "
+                "(SELECT id FROM tenant WHERE name = :name)"
+            ),
             {"name": DEMO_TENANT},
         )
         await session.execute(
-            text("DELETE FROM analytic_event WHERE tenant_id IN "
-                 "(SELECT id FROM tenant WHERE name = :name)"),
+            text(
+                "DELETE FROM analytic_event WHERE tenant_id IN "
+                "(SELECT id FROM tenant WHERE name = :name)"
+            ),
             {"name": DEMO_TENANT},
         )
         await session.execute(
-            text("DELETE FROM audience_member WHERE audience_id IN "
-                 "(SELECT id FROM audience WHERE tenant_id IN "
-                 "(SELECT id FROM tenant WHERE name = :name))"),
+            text(
+                "DELETE FROM audience_member WHERE audience_id IN "
+                "(SELECT id FROM audience WHERE tenant_id IN "
+                "(SELECT id FROM tenant WHERE name = :name))"
+            ),
             {"name": DEMO_TENANT},
         )
         await session.execute(
-            text("DELETE FROM audience WHERE tenant_id IN "
-                 "(SELECT id FROM tenant WHERE name = :name)"),
+            text(
+                "DELETE FROM audience WHERE tenant_id IN (SELECT id FROM tenant WHERE name = :name)"
+            ),
             {"name": DEMO_TENANT},
         )
         await session.execute(
-            text("DELETE FROM task WHERE tenant_id IN "
-                 "(SELECT id FROM tenant WHERE name = :name)"),
+            text("DELETE FROM task WHERE tenant_id IN (SELECT id FROM tenant WHERE name = :name)"),
             {"name": DEMO_TENANT},
         )
         await session.execute(
-            text("DELETE FROM agent WHERE tenant_id IN "
-                 "(SELECT id FROM tenant WHERE name = :name)"),
+            text("DELETE FROM agent WHERE tenant_id IN (SELECT id FROM tenant WHERE name = :name)"),
             {"name": DEMO_TENANT},
         )
         await session.execute(
-            text("DELETE FROM campaign WHERE tenant_id IN "
-                 "(SELECT id FROM tenant WHERE name = :name)"),
+            text(
+                "DELETE FROM campaign WHERE tenant_id IN (SELECT id FROM tenant WHERE name = :name)"
+            ),
             {"name": DEMO_TENANT},
         )
         await session.execute(
-            text("DELETE FROM app_user WHERE tenant_id IN "
-                 "(SELECT id FROM tenant WHERE name = :name)"),
+            text(
+                "DELETE FROM app_user WHERE tenant_id IN (SELECT id FROM tenant WHERE name = :name)"
+            ),
             {"name": DEMO_TENANT},
         )
         await session.execute(
-            text("DELETE FROM audit_log WHERE tenant_id IN "
-                 "(SELECT id FROM tenant WHERE name = :name)"),
+            text(
+                "DELETE FROM audit_log WHERE tenant_id IN "
+                "(SELECT id FROM tenant WHERE name = :name)"
+            ),
             {"name": DEMO_TENANT},
         )
-        await session.execute(
-            text("DELETE FROM tenant WHERE name = :name"), {"name": DEMO_TENANT}
-        )
+        await session.execute(text("DELETE FROM tenant WHERE name = :name"), {"name": DEMO_TENANT})
 
 
 async def seed_tenant_and_admin() -> tuple[uuid.UUID, AppUser]:
@@ -225,8 +232,8 @@ async def main() -> None:
                 "bob@example.com,Bob,Smith,US,vip\n"
                 "carol@example.com,Carol,Jones,US,\n"
                 "dave@example.com,Dave,Burke,DE,blocked\n"
-                ",,,,\n"                            # missing email
-                "bad@@example,Eve,X,US,\n"          # invalid email
+                ",,,,\n"  # missing email
+                "bad@@example,Eve,X,US,\n"  # invalid email
                 "ada@example.com,Dup,Lovelace,GB,\n"  # duplicate
             )
             upload_resp = await client.post(
@@ -235,7 +242,6 @@ async def main() -> None:
             )
             assert upload_resp.status_code == 201, upload_resp.text
             upload = upload_resp.json()
-            seed_audience_id = uuid.UUID(upload["audience_id"])
             print(f"  status: {upload_resp.status_code}")
             print(f"  audience_id: {upload['audience_id']}")
             print(f"  summary: {upload['summary']}")
@@ -329,17 +335,12 @@ async def main() -> None:
 
                 get_settings.cache_clear()
 
-                sync_resp = await client.post(
-                    "/api/integrations/plausible/sync", json={"days": 7}
-                )
+                sync_resp = await client.post("/api/integrations/plausible/sync", json={"days": 7})
                 assert sync_resp.status_code == 200, sync_resp.text
                 sync = sync_resp.json()
             print(f"  status: {sync_resp.status_code}")
             print(f"  fetched: {sync['fetched']}, imported: {sync['imported']}")
-            print(
-                f"  duplicates: {sync['duplicates']}, "
-                f"unattributed: {sync['unattributed']}"
-            )
+            print(f"  duplicates: {sync['duplicates']}, unattributed: {sync['unattributed']}")
 
             # ----------------------------------------------------------- W13
             heading("6. W13 — GET /api/ingest/jobs  (operator dashboard)")
@@ -358,16 +359,12 @@ async def main() -> None:
     async with SessionLocal() as session:
         n_campaigns = (
             await session.execute(
-                select(func.count())
-                .select_from(Campaign)
-                .where(Campaign.tenant_id == tenant_id)
+                select(func.count()).select_from(Campaign).where(Campaign.tenant_id == tenant_id)
             )
         ).scalar_one()
         n_audiences = (
             await session.execute(
-                select(func.count())
-                .select_from(Audience)
-                .where(Audience.tenant_id == tenant_id)
+                select(func.count()).select_from(Audience).where(Audience.tenant_id == tenant_id)
             )
         ).scalar_one()
         n_members = (
@@ -397,9 +394,7 @@ async def main() -> None:
         ).scalar_one()
         n_audit = (
             await session.execute(
-                select(func.count())
-                .select_from(AuditLog)
-                .where(AuditLog.tenant_id == tenant_id)
+                select(func.count()).select_from(AuditLog).where(AuditLog.tenant_id == tenant_id)
             )
         ).scalar_one()
 
@@ -443,10 +438,7 @@ async def main() -> None:
             .all()
         )
     for m in members:
-        print(
-            f"  {m.external_id:<25} source={m.source!r}  "
-            f"payload={short(json.dumps(m.payload))}"
-        )
+        print(f"  {m.external_id:<25} source={m.source!r}  payload={short(json.dumps(m.payload))}")
 
     heading("Analytic events for 'Spring Launch'")
     async with SessionLocal() as session:
@@ -464,13 +456,10 @@ async def main() -> None:
     for e in events:
         utm = e.payload.get("utm_campaign", "<none>")
         attrib = "attributed" if e.campaign_id else "unattributed"
-        print(
-            f"  [{e.event_type.value:>10}] utm={utm!r:<20} "
-            f"metric={e.metric_value}  ({attrib})"
-        )
+        print(f"  [{e.event_type.value:>10}] utm={utm!r:<20} metric={e.metric_value}  ({attrib})")
 
     heading("Done")
-    print(f"Re-run with: cd ~/mas-demo/mas && uv run python -m scripts.slice2_demo")
+    print("Re-run with: cd ~/mas-demo/mas && uv run python -m scripts.slice2_demo")
     print(f"Wipe demo data: DELETE FROM tenant WHERE name = '{DEMO_TENANT}'")
     await engine.dispose()
 

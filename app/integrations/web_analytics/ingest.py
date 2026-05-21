@@ -52,7 +52,10 @@ async def ingest_events(
     for ev in events:
         key = (ev.utm_campaign or "").strip().lower()
         campaign_id = cache.get(key) if ev.utm_campaign else None
-        if ev.utm_campaign and campaign_id is None:
+        # Any event we couldn't pin to a campaign is unattributed traffic,
+        # whether it never carried a utm_campaign or carried one that didn't
+        # match any campaign in the tenant.
+        if campaign_id is None:
             unattributed += 1
         payload = dict(ev.payload)
         if ev.utm_campaign:

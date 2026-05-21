@@ -14,6 +14,7 @@ from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile, s
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.agents.audience_targeting import ensure_audience_targeting_agent
 from app.api.deps import get_tenant_db, require_role
 from app.api.schemas.audience import (
     AudienceDetail,
@@ -21,18 +22,22 @@ from app.api.schemas.audience import (
     CsvRowErrorOut,
     CsvUploadResponse,
     CsvUploadSummary,
+    EnqueueTaskResponse,
     EstimateResponse,
+    MaterialiseAudienceRequest,
     SegmentationCriteriaIn,
 )
 from app.audiences.csv_upload import parse_csv
 from app.audiences.segmentation import (
     SegmentationError,
+    validate_criteria,
 )
 from app.audiences.segmentation import (
     estimate as segmentation_estimate,
 )
 from app.db.enums import TaskStatus, UserRole
 from app.db.models import AppUser, Audience, AudienceMember, Campaign, Task
+from app.orchestrator.queue import enqueue_task
 from app.orchestrator.state_machine import _ensure_orchestrator_agent
 from app.settings.config import get_settings
 
@@ -174,6 +179,60 @@ async def upload_audience_csv(
         ),
         errors=errors_out,
         errors_truncated=truncated,
+    )
+
+
+@campaigns_router.post(
+    "/{campaign_id}/audiences",
+    response_model=EnqueueTaskResponse,
+    status_code=status.HTTP_202_ACCEPTED,
+)
+async def create_audience(
+    campaign_id: UUID,
+    body: MaterialiseAudienceRequest,
+    user: AppUser = Depends(require_role(UserRole.marketer)),
+    db: AsyncSession = Depends(get_tenant_db),
+) -> EnqueueTaskResponse:
+    """E04-S01/S03 — enqueue a criteria-driven materialisation task.
+
+    Poll `/api/ingest/jobs?status=succeeded` for completion; the new
+    audience_id is in the task's `output_data`. The task runs under the
+    per-tenant `audience_targeting` agent, registered by the queue handler.
+    """
+    # Surface validation errors at submit time, before the worker is involved.
+    try:
+        validate_criteria(body.criteria.model_dump())
+    except SegmentationError as exc:
+        raise HTTPException(
+            status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail={
+                "message": str(exc),
+                "section": exc.section,
+                "index": exc.index,
+            },
+        ) from exc
+
+    campaign = await db.get(Campaign, campaign_id)
+    if campaign is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, detail="campaign not found")
+
+    agent = await ensure_audience_targeting_agent(db, user.tenant_id)
+    task = await enqueue_task(
+        db,
+        tenant_id=user.tenant_id,
+        agent_id=agent.id,
+        campaign_id=campaign_id,
+        skill_name="audience_targeting.materialise",
+        input_data={
+            "campaign_id": str(campaign_id),
+            "audience_name": body.name,
+            "criteria": body.criteria.model_dump(),
+        },
+    )
+    return EnqueueTaskResponse(
+        task_id=task.id,
+        skill_name=task.skill_name,
+        status=task.status.value,
     )
 
 

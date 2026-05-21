@@ -83,3 +83,20 @@ class EstimateResponse(BaseModel):
     total_reachable: int
     suppressed: int
     net: int
+
+
+class MaterialiseAudienceRequest(BaseModel):
+    """POST /api/campaigns/{cid}/audiences body — enqueue a materialisation."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    name: str
+    criteria: SegmentationCriteriaIn
+
+
+class EnqueueTaskResponse(BaseModel):
+    """Returned when an action kicks off an async task in the queue."""
+
+    task_id: UUID
+    skill_name: str
+    status: str

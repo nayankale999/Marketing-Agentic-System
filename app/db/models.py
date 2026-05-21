@@ -16,6 +16,7 @@ from sqlalchemy import (
     Date,
     DateTime,
     ForeignKey,
+    LargeBinary,
     Numeric,
     SmallInteger,
     String,
@@ -33,6 +34,7 @@ from app.db.enums import (
     AgentStatus,
     CampaignStatus,
     CampaignType,
+    ChannelPlatform,
     TaskStatus,
     UserRole,
 )
@@ -72,6 +74,12 @@ _CAMPAIGN_TYPE = PgEnum(
 _TASK_STATUS = PgEnum(
     TaskStatus,
     name="task_status",
+    create_type=False,
+    values_callable=lambda e: [m.value for m in e],
+)
+_CHANNEL_PLATFORM = PgEnum(
+    ChannelPlatform,
+    name="channel_platform",
     create_type=False,
     values_callable=lambda e: [m.value for m in e],
 )
@@ -270,5 +278,68 @@ class AgentLog(Base):
     log_data: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False, server_default="{}")
     severity: Mapped[str] = mapped_column(String(20), nullable=False, server_default="info")
     logged_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+
+class Channel(Base):
+    """Publishing channel (email/social/ads) attached to a tenant.
+
+    Minimal stub registered so foreign keys from `integration_credential.channel_id`
+    resolve at ORM-load time. Full coverage (CRUD endpoints, agent integration)
+    lands in Slice 4.
+    """
+
+    __tablename__ = "channel"
+    __table_args__ = (UniqueConstraint("tenant_id", "name"),)
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, server_default=func.gen_random_uuid()
+    )
+    tenant_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("tenant.id", ondelete="CASCADE"), nullable=False
+    )
+    name: Mapped[str] = mapped_column(String(200), nullable=False)
+    platform: Mapped[ChannelPlatform] = mapped_column(_CHANNEL_PLATFORM, nullable=False)
+    api_config: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False, server_default="{}")
+    is_active: Mapped[bool] = mapped_column(nullable=False, server_default="true")
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+
+class IntegrationCredential(Base):
+    """OAuth tokens / API keys for an external provider (CRM, email, social).
+
+    The encrypted_payload is Fernet-encrypted JSON via
+    `app.integrations.credentials.EncryptedPayload`. provider is a free-form
+    string (e.g. 'hubspot', 'salesforce', 'dynamics365'). channel_id is set
+    when the credential is for a publishing channel (email/social/ads);
+    NULL for CRM and analytics providers.
+    """
+
+    __tablename__ = "integration_credential"
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, server_default=func.gen_random_uuid()
+    )
+    tenant_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("tenant.id", ondelete="CASCADE"), nullable=False
+    )
+    channel_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("channel.id", ondelete="CASCADE")
+    )
+    provider: Mapped[str] = mapped_column(String(64), nullable=False)
+    label: Mapped[str] = mapped_column(String(200), nullable=False, server_default="default")
+    encrypted_payload: Mapped[bytes] = mapped_column(LargeBinary, nullable=False)
+    key_version: Mapped[int] = mapped_column(SmallInteger, nullable=False, server_default="1")
+    expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+    updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )

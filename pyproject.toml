@@ -19,6 +19,7 @@ dependencies = [
     "authlib>=1.3",
     "itsdangerous>=2.2",  # required by starlette SessionMiddleware
     "httpx>=0.27",
+    "cryptography>=43",  # Fernet symmetric encryption for stored OAuth tokens
     "structlog>=24.4",
     "opentelemetry-api>=1.27",
     "opentelemetry-sdk>=1.27",
@@ -36,6 +37,7 @@ dev = [
     "pre-commit>=4.0",
     "testcontainers[postgres]>=4.8",
     "psycopg[binary]>=3.2",  # sync driver used by testcontainers' wait-for-ready check
+    "respx>=0.21",           # httpx mocking for connector tests
 ]
 
 [build-system]

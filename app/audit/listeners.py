@@ -19,15 +19,27 @@ from sqlalchemy.orm import Mapper
 
 from app.audit.context import current_actor_id, current_actor_kind
 from app.audit.writer import column_snapshot
-from app.db.models import Agent, AppUser, AuditLog, Campaign, Tenant
+from app.db.models import (
+    Agent,
+    AppUser,
+    AuditLog,
+    Campaign,
+    IntegrationCredential,
+    Tenant,
+)
 
 _REGISTERED = False
 
 
 def _make_insert_listener(
-    entity_kind: str, tenant_id_getter: Callable[[Any], UUID]
+    entity_kind: str,
+    tenant_id_getter: Callable[[Any], UUID],
+    skip_columns: frozenset[str] = frozenset(),
 ) -> Callable[[Mapper[Any], Connection, Any], None]:
     def _on_insert(mapper: Mapper[Any], connection: Connection, target: Any) -> None:
+        snapshot = column_snapshot(target)
+        for col in skip_columns:
+            snapshot.pop(col, None)
         connection.execute(
             insert(AuditLog).values(
                 tenant_id=tenant_id_getter(target),
@@ -36,7 +48,7 @@ def _make_insert_listener(
                 entity_kind=entity_kind,
                 entity_id=target.id,
                 action="created",
-                after_state=column_snapshot(target),
+                after_state=snapshot,
                 # The column is named `metadata` in the DB but mapped as
                 # `extra_metadata` on the ORM class (because `metadata` is
                 # reserved by DeclarativeBase). The insert kwargs use the
@@ -55,11 +67,19 @@ def register() -> None:
         return
     _REGISTERED = True
 
-    bindings: list[tuple[type, str, Callable[[Any], UUID]]] = [
-        (Tenant, "tenant", lambda t: t.id),
-        (AppUser, "app_user", lambda t: t.tenant_id),
-        (Agent, "agent", lambda t: t.tenant_id),
-        (Campaign, "campaign", lambda t: t.tenant_id),
+    bindings: list[tuple[type, str, Callable[[Any], UUID], frozenset[str]]] = [
+        (Tenant, "tenant", lambda t: t.id, frozenset()),
+        (AppUser, "app_user", lambda t: t.tenant_id, frozenset()),
+        (Agent, "agent", lambda t: t.tenant_id, frozenset()),
+        (Campaign, "campaign", lambda t: t.tenant_id, frozenset()),
+        # Never let the encrypted token blob into audit_log -- the whole point
+        # of the encryption layer is that nothing else holds the ciphertext.
+        (
+            IntegrationCredential,
+            "integration_credential",
+            lambda t: t.tenant_id,
+            frozenset({"encrypted_payload"}),
+        ),
     ]
-    for model, kind, getter in bindings:
-        event.listen(model, "after_insert", _make_insert_listener(kind, getter))
+    for model, kind, getter, skip in bindings:
+        event.listen(model, "after_insert", _make_insert_listener(kind, getter, skip))

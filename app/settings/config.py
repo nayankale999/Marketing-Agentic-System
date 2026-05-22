@@ -45,6 +45,9 @@ class Settings(BaseSettings):
     # Default model for the `copywriting.generate` tool. Override per-tenant or
     # per-deployment via env (e.g. claude-opus-4-7 for higher-quality drafts).
     copywriting_model: str = "claude-sonnet-4-6"
+    # Default model for the Campaign Strategist agent (W20). Same conditional-
+    # registration story as copywriting — requires anthropic_api_key.
+    strategist_model: str = "claude-sonnet-4-6"
 
     # OpenTelemetry
     otel_exporter_otlp_endpoint: str = "http://localhost:4317"

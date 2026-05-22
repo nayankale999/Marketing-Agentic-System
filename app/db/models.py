@@ -475,3 +475,75 @@ class BrandVoice(Base):
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )
+
+
+class TenantConstraint(Base):
+    """Admin-set guardrails the Strategist must respect (W20, E05-S05).
+
+    `kind` is constrained at the DB layer to the values in `TenantConstraintKind`;
+    `payload` carries the kind-specific fields (e.g. `{platform: "sms"}` for
+    `forbid_channel`, or `{platform: "email", per: "week", limit: 5}` for
+    `hard_cap`)."""
+
+    __tablename__ = "tenant_constraint"
+    __table_args__ = (
+        CheckConstraint(
+            "kind IN ('forbid_channel', 'hard_cap')",
+            name="ck_tenant_constraint_kind",
+        ),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, server_default=func.gen_random_uuid()
+    )
+    tenant_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("tenant.id", ondelete="CASCADE"), nullable=False
+    )
+    kind: Mapped[str] = mapped_column(String(40), nullable=False)
+    payload: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False, server_default="{}")
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+
+class StrategyProposal(Base):
+    """Versioned campaign-strategy proposal (W20, E05-S01).
+
+    Append-only by convention: edits create a new version, accept flips the
+    `is_accepted` flag (atomic with deactivating the prior accepted row, if
+    any — the partial unique index enforces at-most-one-accepted-per-campaign).
+    `created_by_kind` is 'agent' for fresh proposals from the Strategist and
+    'user' for manual overrides via PATCH."""
+
+    __tablename__ = "strategy_proposal"
+    __table_args__ = (
+        UniqueConstraint("campaign_id", "version", name="uq_strategy_proposal_campaign_version"),
+        CheckConstraint(
+            "created_by_kind IN ('user', 'agent', 'system')",
+            name="ck_strategy_proposal_created_by_kind",
+        ),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, server_default=func.gen_random_uuid()
+    )
+    tenant_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("tenant.id", ondelete="CASCADE"), nullable=False
+    )
+    campaign_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("campaign.id", ondelete="CASCADE"), nullable=False
+    )
+    version: Mapped[int] = mapped_column(Integer, nullable=False)
+    payload: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
+    is_accepted: Mapped[bool] = mapped_column(nullable=False, server_default="false")
+    created_by_kind: Mapped[str] = mapped_column(String(20), nullable=False)
+    created_by_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True))
+    validation_warnings: Mapped[list[dict[str, Any]]] = mapped_column(
+        JSONB, nullable=False, server_default="[]"
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )

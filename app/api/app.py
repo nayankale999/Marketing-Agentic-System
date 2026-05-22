@@ -14,6 +14,8 @@ from app.api import (
     ingest,
     integrations,
     me,
+    strategy,
+    tenant_constraints,
 )
 from app.audit import register_listeners
 from app.observability import init_observability, tag_span_with_actor
@@ -38,6 +40,9 @@ def create_app() -> FastAPI:
     application.include_router(audiences.audiences_router)
     application.include_router(ingest.router)
     application.include_router(brand_voice.router)
+    application.include_router(strategy.campaigns_router)
+    application.include_router(strategy.proposals_router)
+    application.include_router(tenant_constraints.router)
     init_observability(app=application)
     return application
 

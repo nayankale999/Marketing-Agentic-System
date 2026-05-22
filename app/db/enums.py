@@ -125,3 +125,14 @@ class EventKind(enum.StrEnum):
     bounce = "bounce"
     spam_complaint = "spam_complaint"
     spend = "spend"
+
+
+class TenantConstraintKind(enum.StrEnum):
+    """Admin-set guardrails the Strategist must respect (W20, E05-S05).
+
+    W20 enforces `forbid_channel`; `hard_cap` is accepted and stored but its
+    enforcement lands in W21 once the sequence calendar exists.
+    """
+
+    forbid_channel = "forbid_channel"
+    hard_cap = "hard_cap"

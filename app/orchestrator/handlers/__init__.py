@@ -6,6 +6,7 @@ handler registry. Idempotent.
 
 from app.orchestrator.handlers.audience import audience_materialise_handler
 from app.orchestrator.handlers.echo import echo_handler
+from app.orchestrator.handlers.strategist import campaign_strategist_propose_handler
 from app.orchestrator.handlers.tool import register_tool_handlers
 from app.orchestrator.registry import register_handler
 from app.tools import register_builtin_tools
@@ -20,6 +21,7 @@ def register_builtin_handlers() -> None:
     _REGISTERED = True
     register_handler("echo", echo_handler)
     register_handler("audience_targeting.materialise", audience_materialise_handler)
+    register_handler("campaign_strategist.propose", campaign_strategist_propose_handler)
     # Tools must be registered before their handlers can be built.
     register_builtin_tools()
     register_tool_handlers()
@@ -27,6 +29,7 @@ def register_builtin_handlers() -> None:
 
 __all__ = [
     "audience_materialise_handler",
+    "campaign_strategist_propose_handler",
     "echo_handler",
     "register_builtin_handlers",
     "register_tool_handlers",

@@ -19,7 +19,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.audit.context import current_actor_id, current_actor_kind
 from app.audit.writer import write_audit
 from app.db.enums import AgentKind, CampaignStatus
-from app.db.models import Agent, Campaign
+from app.db.models import Agent, Campaign, StrategyProposal
 from app.orchestrator.queue import enqueue_task
 
 Guard = Callable[[AsyncSession, Campaign], Awaitable[bool]]
@@ -164,5 +164,30 @@ campaign_sm.register(
         from_state=CampaignStatus.drafted,
         to_state=CampaignStatus.drafted,
         on_enter=_enqueue_echo_step,
+    )
+)
+
+
+async def _has_accepted_strategy(session: AsyncSession, campaign: Campaign) -> bool:
+    """Guard for `set_strategy`: a strategy proposal must be accepted before
+    we leave `audience_built`. The accept endpoint flips the flag in the same
+    transaction, so the guard sees it on the subsequent transition call."""
+    accepted = (
+        await session.execute(
+            select(StrategyProposal.id).where(
+                StrategyProposal.campaign_id == campaign.id,
+                StrategyProposal.is_accepted.is_(True),
+            )
+        )
+    ).first()
+    return accepted is not None
+
+
+campaign_sm.register(
+    Transition(
+        name="set_strategy",
+        from_state=CampaignStatus.audience_built,
+        to_state=CampaignStatus.strategy_set,
+        guard=_has_accepted_strategy,
     )
 )

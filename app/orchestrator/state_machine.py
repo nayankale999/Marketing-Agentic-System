@@ -268,11 +268,18 @@ async def _all_required_assets_drafted(
 async def _flip_drafted_assets_to_pending_approval(
     session: AsyncSession, campaign: Campaign
 ) -> None:
-    """on_enter for `submit_for_approval` (W25, E07-S01): move every required
-    drafted asset into `pending_approval` so it surfaces in the manager's
-    queue. Idempotent — re-running (after a regenerate→re-submit cycle)
-    only flips the assets that came back to `drafted`."""
+    """on_enter for `submit_for_approval` (W25, E07-S01 + W26, E07-S04 #3):
+    move every required drafted asset into `pending_approval` and snapshot
+    the tenant's approval-gate thresholds onto each asset.
+
+    The snapshot is the load-bearing piece for E07-S04 #3: 'in-flight
+    approvals continue under the threshold at submission time'. Approve
+    endpoints read the snapshot, not the live tenant_approval_settings row.
+    A regenerate→re-submit cycle captures a fresh snapshot at the next
+    submission (correct, intentional)."""
     from datetime import UTC, datetime  # local import — only used here
+
+    from app.db.models import TenantApprovalSettings
 
     rows = (
         await session.execute(
@@ -285,10 +292,35 @@ async def _flip_drafted_assets_to_pending_approval(
     ).scalars().all()
     if not rows:
         return
+
+    settings_row = (
+        await session.execute(
+            select(TenantApprovalSettings).where(
+                TenantApprovalSettings.tenant_id == campaign.tenant_id
+            )
+        )
+    ).scalar_one_or_none()
+
     now = datetime.now(UTC)
+    snapshot: dict[str, object] = {
+        "admin_required_above_amount": (
+            str(settings_row.admin_required_above_amount)
+            if settings_row and settings_row.admin_required_above_amount is not None
+            else None
+        ),
+        "auto_approval_cap_amount": (
+            str(settings_row.auto_approval_cap_amount) if settings_row else "0"
+        ),
+        "currency": settings_row.currency if settings_row else "USD",
+        "snapshot_taken_at": now.isoformat(),
+    }
     for row in rows:
         row.status = AssetStatus.pending_approval
-        row.updated_at = now  # surfaces "submitted_at" ordering in the queue
+        row.updated_at = now
+        row.extra_metadata = {
+            **(row.extra_metadata or {}),
+            "approval_threshold": snapshot,
+        }
     await session.flush()
 
 

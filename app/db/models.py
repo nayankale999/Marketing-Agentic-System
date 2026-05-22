@@ -780,3 +780,46 @@ class ApprovalDecisionLog(Base):
     decided_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )
+
+
+class TenantApprovalSettings(Base):
+    """Per-tenant approval gating thresholds (W26, E07-S03/04).
+
+    Single-row-per-tenant (UNIQUE on tenant_id). The approve endpoints read
+    the snapshot embedded in `content_asset.extra_metadata.approval_threshold`,
+    not this table directly — that snapshot is captured at submit_for_approval
+    time so in-flight approvals use the threshold that applied when the asset
+    entered the queue, not the latest value (E07-S04 #3)."""
+
+    __tablename__ = "tenant_approval_settings"
+    __table_args__ = (
+        CheckConstraint(
+            "admin_required_above_amount IS NULL OR admin_required_above_amount >= 0",
+            name="ck_tenant_approval_settings_admin_amount_nonneg",
+        ),
+        CheckConstraint(
+            "auto_approval_cap_amount >= 0",
+            name="ck_tenant_approval_settings_cap_nonneg",
+        ),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, server_default=func.gen_random_uuid()
+    )
+    tenant_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("tenant.id", ondelete="CASCADE"),
+        nullable=False,
+        unique=True,
+    )
+    admin_required_above_amount: Mapped[Decimal | None] = mapped_column(Numeric(14, 2))
+    auto_approval_cap_amount: Mapped[Decimal] = mapped_column(
+        Numeric(14, 2), nullable=False, server_default="0"
+    )
+    currency: Mapped[str] = mapped_column(CHAR(3), nullable=False, server_default="USD")
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )

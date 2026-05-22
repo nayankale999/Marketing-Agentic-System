@@ -22,6 +22,8 @@ from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from decimal import Decimal, InvalidOperation
+
 from app.agents.content_creator import ensure_content_creator_agent
 from app.api.deps import get_tenant_db, require_role
 from app.api.schemas.approval import (
@@ -30,6 +32,11 @@ from app.api.schemas.approval import (
     ApprovalQueueItem,
     ApprovalQueueResponse,
     ApproveRequest,
+    BatchApproveRequest,
+    BatchApproveResponse,
+    BatchApprovalSummary,
+    BatchApprovedEntry,
+    BatchExclusionEntry,
     RejectRequest,
 )
 from app.audit.context import current_actor_id, current_actor_kind
@@ -186,6 +193,19 @@ async def approve_asset(
             detail="asset is compliance-blocked — clear via /clear-compliance first",
         )
 
+    # E07-S04: threshold gate. Snapshot was taken at submit_for_approval time
+    # so the value applied here is what was true when the asset entered the
+    # queue, not the latest tenant settings value.
+    threshold_decision = _evaluate_threshold(asset, campaign, user)
+    if threshold_decision["requires_admin"] and user.role != UserRole.admin:
+        raise HTTPException(
+            status.HTTP_403_FORBIDDEN,
+            detail={
+                "message": "requires higher role: admin",
+                "applied_threshold": threshold_decision["applied_threshold"],
+            },
+        )
+
     edits_payload: dict[str, Any] | None = None
     if body.edited_content is not None or body.edited_fields:
         edits_payload = {
@@ -244,7 +264,12 @@ async def approve_asset(
         action="approved" if edits_payload is None else "approved_with_edits",
         before_state=before,
         after_state=after,
-        metadata={"decision_id": str(decision.id)},
+        metadata={
+            "decision_id": str(decision.id),
+            # E07-S04 #4: record the threshold the reviewer was evaluated
+            # against so the audit trail captures what gate applied.
+            "applied_threshold": threshold_decision["applied_threshold"],
+        },
     )
 
     await _maybe_advance_to_ready_to_launch(db, campaign=campaign)
@@ -396,3 +421,276 @@ async def _maybe_revert_to_content_in_production(
         await campaign_sm.apply(db, campaign, "regenerate_after_rejection")
     except (UnknownTransitionError, GuardFailedError):
         return
+
+
+# ---------------------------------------------------------------------------
+# Threshold evaluation (W26, E07-S04)
+# ---------------------------------------------------------------------------
+
+
+def _evaluate_threshold(
+    asset: ContentAsset, campaign: Campaign, user: AppUser
+) -> dict[str, object]:
+    """Decide whether the reviewer's role is sufficient for this asset.
+
+    Returns a dict with:
+      - `requires_admin`: bool — true if the threshold says admin role needed
+      - `applied_threshold`: structured dict for audit + 403 detail
+    """
+    snapshot = (asset.extra_metadata or {}).get("approval_threshold") or {}
+    admin_raw = snapshot.get("admin_required_above_amount")
+    snapshot_currency = snapshot.get("currency") or "USD"
+
+    applied: dict[str, object] = {
+        "admin_required_above_amount": admin_raw,
+        "snapshot_currency": snapshot_currency,
+        "campaign_budget": str(campaign.budget_total),
+        "campaign_currency": campaign.currency,
+        "snapshot_taken_at": snapshot.get("snapshot_taken_at"),
+        "skipped": None,
+    }
+
+    # No snapshot → no gate applied (e.g. assets that bypassed the state
+    # machine in a test harness). Same outcome as "no threshold configured".
+    if admin_raw is None:
+        applied["skipped"] = "no_threshold_configured"
+        return {"requires_admin": False, "applied_threshold": applied}
+
+    # Currency mismatch → we don't have FX plumbing; skip rather than convert.
+    # Logged in audit so operators can see the gap.
+    if snapshot_currency != campaign.currency:
+        applied["skipped"] = "currency_mismatch"
+        return {"requires_admin": False, "applied_threshold": applied}
+
+    try:
+        admin_required_above = Decimal(str(admin_raw))
+    except (InvalidOperation, ValueError):
+        applied["skipped"] = "invalid_threshold_value"
+        return {"requires_admin": False, "applied_threshold": applied}
+
+    requires_admin = campaign.budget_total > admin_required_above
+    return {"requires_admin": requires_admin, "applied_threshold": applied}
+
+
+def _exceeds_auto_approval_cap(
+    asset: ContentAsset, campaign: Campaign
+) -> tuple[bool, Decimal | None]:
+    """Check the auto_approval_cap from the asset's snapshot. Returns
+    `(exceeds, cap)` so the caller can include the cap in the exclusion entry."""
+    snapshot = (asset.extra_metadata or {}).get("approval_threshold") or {}
+    cap_raw = snapshot.get("auto_approval_cap_amount")
+    if cap_raw is None:
+        # Default 0 still applies — treat any campaign budget > 0 as over cap.
+        cap_raw = "0"
+    snapshot_currency = snapshot.get("currency") or "USD"
+    if snapshot_currency != campaign.currency:
+        return False, None  # currency mismatch → skip cap too
+    try:
+        cap = Decimal(str(cap_raw))
+    except (InvalidOperation, ValueError):
+        return False, None
+    return campaign.budget_total > cap, cap
+
+
+# ---------------------------------------------------------------------------
+# Batch approve (W26, E07-S03)
+# ---------------------------------------------------------------------------
+
+
+@router.post(
+    "/approvals/batch-approve",
+    response_model=BatchApproveResponse,
+)
+async def batch_approve(
+    body: BatchApproveRequest,
+    user: AppUser = Depends(require_role(UserRole.manager)),
+    db: AsyncSession = Depends(get_tenant_db),
+) -> BatchApproveResponse:
+    """E07-S03: approve up to 200 assets in one call. Each asset is evaluated
+    against compliance, status, auto_approval_cap, and admin-role threshold.
+    Excluded items return a structured reason so the UI can surface them
+    individually for follow-up.
+
+    Per-asset atomicity (AC #2): each successful approval lives in its own
+    savepoint, so a constraint failure on one row doesn't roll back the others.
+    """
+    rows = (
+        await db.execute(
+            select(ContentAsset).where(ContentAsset.id.in_(body.asset_ids))
+        )
+    ).scalars().all()
+    rows_by_id: dict[UUID, ContentAsset] = {row.id: row for row in rows}
+
+    # Pre-load every distinct campaign in one query.
+    campaign_ids = {row.campaign_id for row in rows}
+    campaigns = (
+        await db.execute(
+            select(Campaign).where(Campaign.id.in_(campaign_ids))
+        )
+    ).scalars().all()
+    campaigns_by_id: dict[UUID, Campaign] = {c.id: c for c in campaigns}
+
+    approved: list[BatchApprovedEntry] = []
+    excluded: list[BatchExclusionEntry] = []
+    channel_counts: dict[str, int] = {}
+    approved_campaign_ids: set[UUID] = set()
+    currency_for_summary: str | None = None
+
+    for asset_id in body.asset_ids:
+        asset = rows_by_id.get(asset_id)
+        if asset is None:
+            excluded.append(
+                BatchExclusionEntry(asset_id=asset_id, reason="not_found", details={})
+            )
+            continue
+        campaign = campaigns_by_id.get(asset.campaign_id)
+        if campaign is None:
+            excluded.append(
+                BatchExclusionEntry(
+                    asset_id=asset_id,
+                    reason="not_found",
+                    details={"missing": "campaign"},
+                )
+            )
+            continue
+
+        # Status check first — the cheapest filter.
+        if asset.status not in {AssetStatus.pending_approval, AssetStatus.rejected}:
+            excluded.append(
+                BatchExclusionEntry(
+                    asset_id=asset_id,
+                    reason="wrong_status",
+                    details={"status": asset.status.value},
+                )
+            )
+            continue
+
+        # Compliance — never auto-approve a flagged asset (AC E07-S03 #3).
+        if _is_compliance_blocked(asset):
+            excluded.append(
+                BatchExclusionEntry(
+                    asset_id=asset_id,
+                    reason="compliance_blocked",
+                    details={},
+                )
+            )
+            continue
+
+        # Auto-approval cap (AC E07-S03 #4).
+        exceeds_cap, cap_value = _exceeds_auto_approval_cap(asset, campaign)
+        if exceeds_cap:
+            excluded.append(
+                BatchExclusionEntry(
+                    asset_id=asset_id,
+                    reason="above_auto_approval_cap",
+                    details={
+                        "campaign_budget": str(campaign.budget_total),
+                        "cap": str(cap_value) if cap_value is not None else None,
+                        "currency": campaign.currency,
+                    },
+                )
+            )
+            continue
+
+        # Admin-role threshold (AC E07-S04 #1/#2 applied in batch context too).
+        threshold = _evaluate_threshold(asset, campaign, user)
+        if threshold["requires_admin"] and user.role != UserRole.admin:
+            excluded.append(
+                BatchExclusionEntry(
+                    asset_id=asset_id,
+                    reason="requires_admin_role",
+                    details={
+                        "campaign_budget": str(campaign.budget_total),
+                        "threshold": str(
+                            threshold["applied_threshold"].get(
+                                "admin_required_above_amount"
+                            )
+                        ),
+                        "currency": campaign.currency,
+                    },
+                )
+            )
+            continue
+
+        # All filters passed — this one would (or will) auto-approve.
+        platform = _platform_for(asset) or asset.asset_type.value
+        channel_counts[platform] = channel_counts.get(platform, 0) + 1
+        approved_campaign_ids.add(campaign.id)
+        currency_for_summary = currency_for_summary or campaign.currency
+
+        if body.dry_run:
+            approved.append(
+                BatchApprovedEntry(asset_id=asset_id, decision_id=None)
+            )
+            continue
+
+        # Real write — per-asset savepoint so failures don't cascade.
+        try:
+            async with db.begin_nested():
+                decision = ApprovalDecisionLog(
+                    content_asset_id=asset.id,
+                    reviewer_id=user.id,
+                    decision=ApprovalDecision.approved,
+                    reason=None,
+                    edits={"batch": True},
+                )
+                db.add(decision)
+                before = column_snapshot(asset)
+                asset.status = AssetStatus.approved
+                await db.flush()
+                after = column_snapshot(asset)
+                write_audit(
+                    db,
+                    tenant_id=asset.tenant_id,
+                    actor_kind=current_actor_kind.get(),
+                    actor_id=current_actor_id.get(),
+                    entity_kind="content_asset",
+                    entity_id=asset.id,
+                    action="approved",
+                    before_state=before,
+                    after_state=after,
+                    metadata={
+                        "decision_id": str(decision.id),
+                        "applied_threshold": threshold["applied_threshold"],
+                        "via": "batch_approve",
+                    },
+                )
+        except Exception as exc:  # noqa: BLE001 — record + continue per AC #2
+            excluded.append(
+                BatchExclusionEntry(
+                    asset_id=asset_id,
+                    reason="write_failed",
+                    details={"error": str(exc)[:200]},
+                )
+            )
+            continue
+
+        approved.append(
+            BatchApprovedEntry(asset_id=asset_id, decision_id=decision.id)
+        )
+
+    total_spend = sum(
+        (campaigns_by_id[cid].budget_total for cid in approved_campaign_ids),
+        start=Decimal("0"),
+    )
+    summary = BatchApprovalSummary(
+        channel_counts=channel_counts,
+        total_spend_exposed=str(total_spend),
+        currency=currency_for_summary or "USD",
+        would_approve_count=len(approved),
+        excluded_count=len(excluded),
+    )
+
+    if not body.dry_run:
+        # Drive the campaign forward if every required asset is approved.
+        for campaign_id in approved_campaign_ids:
+            await _maybe_advance_to_ready_to_launch(
+                db, campaign=campaigns_by_id[campaign_id]
+            )
+
+    return BatchApproveResponse(
+        summary=summary,
+        approved=approved,
+        excluded=excluded,
+        dry_run=body.dry_run,
+    )

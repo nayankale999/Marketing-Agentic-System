@@ -74,3 +74,42 @@ class ApprovalHistoryResponse(BaseModel):
     asset_id: UUID
     decisions: list[ApprovalDecisionOut]
     total: int
+
+
+class BatchApproveRequest(BaseModel):
+    """Body for `POST /api/approvals/batch-approve` (W26, E07-S03)."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    asset_ids: list[UUID] = Field(min_length=1, max_length=200)
+    dry_run: bool = False
+
+
+class BatchApprovalSummary(BaseModel):
+    channel_counts: dict[str, int]
+    total_spend_exposed: str  # Decimal as string for client-side rounding control
+    currency: str
+    would_approve_count: int
+    excluded_count: int
+
+
+class BatchApprovedEntry(BaseModel):
+    asset_id: UUID
+    decision_id: UUID | None  # None when dry_run=true
+
+
+class BatchExclusionEntry(BaseModel):
+    """One per asset that didn't make it into the auto-approved set. `reason`
+    is a stable identifier; `details` carries the relevant amounts so a UI
+    can render an explainer ('over cap by $X', 'requires admin role')."""
+
+    asset_id: UUID
+    reason: str  # compliance_blocked | above_auto_approval_cap | requires_admin_role | wrong_status | not_found
+    details: dict[str, str | None] = Field(default_factory=dict)
+
+
+class BatchApproveResponse(BaseModel):
+    summary: BatchApprovalSummary
+    approved: list[BatchApprovedEntry]
+    excluded: list[BatchExclusionEntry]
+    dry_run: bool

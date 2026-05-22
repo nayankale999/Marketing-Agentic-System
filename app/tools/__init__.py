@@ -3,7 +3,7 @@
 W8 ships the base class + registry + two stub tools. Real tools land per E11.
 Copywriting (W17, E11-S02) registers only when ANTHROPIC_API_KEY is configured —
 without a key we'd hit a 401 on the first call, so a missing tool is preferable
-to a broken one.
+to a broken one. SEO (W18, E11-S01) is rule-based and registers unconditionally.
 """
 
 from anthropic import AsyncAnthropic
@@ -12,6 +12,7 @@ from app.settings.config import get_settings
 from app.tools._stubs import EchoTool, FlakyTool
 from app.tools.base import Tool, ToolRegistry, tool_registry
 from app.tools.copywriting import CopywritingTool
+from app.tools.seo import SeoAnalysisTool
 
 _REGISTERED = False
 
@@ -24,6 +25,7 @@ def register_builtin_tools() -> None:
     _REGISTERED = True
     tool_registry.register(EchoTool())
     tool_registry.register(FlakyTool())
+    tool_registry.register(SeoAnalysisTool())
 
     settings = get_settings()
     if settings.anthropic_api_key:
@@ -39,6 +41,7 @@ __all__ = [
     "CopywritingTool",
     "EchoTool",
     "FlakyTool",
+    "SeoAnalysisTool",
     "Tool",
     "ToolRegistry",
     "register_builtin_tools",

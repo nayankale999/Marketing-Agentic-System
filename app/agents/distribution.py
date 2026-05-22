@@ -43,6 +43,7 @@ from app.db.models import (
     Audience,
     AudienceMember,
     Campaign,
+    Channel,
     ContentAsset,
     DispatchAttempt,
     FrequencyCapSetting,
@@ -187,12 +188,29 @@ async def schedule_approved_assets(
             },
         )
 
+        skill = _dispatch_skill_for(asset)
+        if skill is None:
+            # Unmapped asset type — leave it scheduled in the DB but skip
+            # enqueueing. The schedule still appears on the calendar; ops
+            # will see the warning in agent_log. (W30 covers email + social;
+            # blog/landing_page_copy publishing lands separately.)
+            asset.extra_metadata = {
+                **(asset.extra_metadata or {}),
+                "schedule_warning": {
+                    "kind": "no_dispatch_handler",
+                    "asset_type": asset.asset_type.value,
+                },
+            }
+            await session.flush()
+            scheduled.append(asset)
+            continue
+
         await enqueue_task(
             session,
             tenant_id=asset.tenant_id,
             agent_id=agent.id,
             campaign_id=campaign.id,
-            skill_name="distribution.dispatch_email",
+            skill_name=skill,
             input_data={
                 "asset_id": str(asset.id),
                 "campaign_id": str(campaign.id),
@@ -202,6 +220,19 @@ async def schedule_approved_assets(
         scheduled.append(asset)
 
     return scheduled
+
+
+def _dispatch_skill_for(asset: ContentAsset) -> str | None:
+    """Route by asset_type to the right dispatch handler skill.
+
+    W30 covers email + social_post. Blog/landing_page_copy/sms publishing
+    are separate pipelines that don't exist yet — those assets land in
+    `scheduled` but no task is enqueued for them."""
+    if asset.asset_type == AssetType.email:
+        return "distribution.dispatch_email"
+    if asset.asset_type == AssetType.social_post:
+        return "distribution.dispatch_social"
+    return None
 
 
 # ---------------------------------------------------------------------------
@@ -450,6 +481,252 @@ async def dispatch_email_asset(
         "status": asset.status.value,
         "summary": summary,
     }
+
+
+# ---------------------------------------------------------------------------
+# Social dispatch (W30, E12-S03 + E11-S05)
+# ---------------------------------------------------------------------------
+
+
+async def dispatch_social_asset(
+    session: AsyncSession, *, asset_id: UUID
+) -> dict[str, Any]:
+    """Publish a social_post asset via the channel's configured provider.
+
+    Same idempotency anchor as email: `dispatch_attempt` row keyed by
+    `asset:{aid}:channel:{cid}`. One social post has one "recipient" (the
+    channel itself), so the row count per published asset is 1.
+
+    On `OAuthRevokedError`: flip the campaign to `paused` (bypassing the
+    state machine — proper transition lands with W31/E08-S07), write an
+    audit row, and don't re-enqueue. Admin must re-OAuth + manually
+    resume the campaign."""
+    from app.integrations.social import (
+        OAuthRevokedError,
+        SocialPost,
+        build_social_connector,
+    )
+    from app.tools.social_publish import SocialPublishTool
+
+    asset = await session.get(ContentAsset, asset_id)
+    if asset is None:
+        raise DistributionPreconditionError(f"content_asset {asset_id} not found")
+    if asset.status != AssetStatus.scheduled:
+        raise DistributionPreconditionError(
+            f"asset {asset_id} is in '{asset.status.value}', not eligible for dispatch"
+        )
+    if asset.asset_type != AssetType.social_post:
+        raise DistributionPreconditionError(
+            f"asset {asset_id} is type '{asset.asset_type.value}'; social dispatcher only handles 'social_post'"
+        )
+    if asset.channel_id is None:
+        raise DistributionPreconditionError(
+            f"asset {asset_id} has no channel_id; cannot dispatch without a destination"
+        )
+
+    campaign = await session.get(Campaign, asset.campaign_id)
+    if campaign is None:
+        raise DistributionPreconditionError(
+            f"campaign {asset.campaign_id} not found"
+        )
+
+    channel = await session.get(Channel, asset.channel_id)
+    if channel is None:
+        raise DistributionPreconditionError(
+            f"channel {asset.channel_id} not found"
+        )
+    api_config = channel.api_config or {}
+    provider = str(api_config.get("provider") or channel.platform.value)
+    page_urn = str(api_config.get("page_urn") or "")
+    if not page_urn:
+        raise DistributionPreconditionError(
+            f"channel {asset.channel_id} api_config is missing page_urn"
+        )
+
+    cred = (
+        await session.execute(
+            select(IntegrationCredential).where(
+                IntegrationCredential.channel_id == channel.id,
+                IntegrationCredential.provider == provider,
+            )
+        )
+    ).scalar_one_or_none()
+    if cred is None:
+        raise DistributionPreconditionError(
+            f"no {provider} credential attached to channel {channel.id}"
+        )
+
+    payload = get_encrypted_payload().decrypt(cred.encrypted_payload)
+
+    from app.settings.config import get_settings as _gs
+
+    s = _gs()
+    if provider == "linkedin":
+        client_id, client_secret = s.linkedin_client_id, s.linkedin_client_secret
+    else:
+        # Future providers register here. Unknown ones can't reach this
+        # point because schedule_approved_assets only routes social_post
+        # for known channel platforms.
+        raise DistributionPreconditionError(
+            f"no client config for social provider '{provider}'"
+        )
+
+    connector = build_social_connector(
+        provider, client_id=client_id, client_secret=client_secret
+    )
+
+    idempotency_key = f"asset:{asset.id}:channel:{channel.id}"
+    tool = SocialPublishTool(
+        connector=connector,
+        access_token=payload["access_token"],
+        session=session,
+        tenant_id=asset.tenant_id,
+    )
+
+    text = _social_text_from_asset(asset)
+    media_required = bool((asset.extra_metadata or {}).get("media_required"))
+    media_url = (asset.extra_metadata or {}).get("media_url")
+
+    try:
+        result = await tool.call(
+            {
+                "platform": provider,
+                "page_urn": page_urn,
+                "content": {
+                    "text": text,
+                    "media_url": media_url,
+                    "media_required": media_required,
+                },
+                "idempotency_key": idempotency_key,
+            }
+        )
+    except OAuthRevokedError as exc:
+        # E12-S03 #3: pause + audit + return cleanly so the changes persist.
+        # Same pattern as W23 compliance-error path: raising would roll back
+        # the pause along with everything else in the transaction.
+        await _pause_campaign_on_oauth_revoked(
+            session, campaign=campaign, channel_id=channel.id, provider=provider
+        )
+        asset.status = AssetStatus.failed
+        asset.extra_metadata = {
+            **(asset.extra_metadata or {}),
+            "dispatch_error": {"kind": "oauth_revoked", "message": str(exc)},
+        }
+        await session.flush()
+        return {
+            "asset_id": str(asset.id),
+            "status": asset.status.value,
+            "error": "oauth_revoked",
+            "message": str(exc),
+        }
+
+    provider_post_id = str(result["provider_post_id"])
+    post_url = str(result["url"])
+    sent_at = datetime.now(UTC)
+
+    await _upsert_dispatch_attempt(
+        session,
+        tenant_id=asset.tenant_id,
+        content_asset_id=asset.id,
+        audience_external_id=None,
+        recipient_identifier=page_urn,
+        idempotency_key=idempotency_key,
+        provider=provider,
+        provider_message_id=provider_post_id,
+        status="sent",
+        last_error=None,
+        sent_at=sent_at,
+    )
+
+    before = column_snapshot(asset)
+    asset.status = AssetStatus.published
+    asset.published_at = sent_at
+    asset.extra_metadata = {
+        **(asset.extra_metadata or {}),
+        "social_post": {
+            "provider": provider,
+            "provider_post_id": provider_post_id,
+            "url": post_url,
+            "idempotent_hit": bool(result.get("idempotent_hit")),
+        },
+        "dispatch_summary": {
+            "sent": 1 if not result.get("idempotent_hit") else 0,
+            "idempotent_hits": 1 if result.get("idempotent_hit") else 0,
+            "audience_size": 1,
+        },
+        "dispatch_provider": provider,
+    }
+    await session.flush()
+
+    write_audit(
+        session,
+        tenant_id=asset.tenant_id,
+        actor_kind=current_actor_kind.get(),
+        actor_id=current_actor_id.get(),
+        entity_kind="content_asset",
+        entity_id=asset.id,
+        action="published",
+        before_state=before,
+        after_state=column_snapshot(asset),
+        metadata={"provider": provider, "provider_post_id": provider_post_id},
+    )
+
+    await _maybe_go_live(session, campaign=campaign)
+    return {
+        "asset_id": str(asset.id),
+        "status": asset.status.value,
+        "provider_post_id": provider_post_id,
+        "url": post_url,
+    }
+
+
+def _social_text_from_asset(asset: ContentAsset) -> str:
+    """Pull the publishable text off the asset. Prefers
+    metadata.fields.body / metadata.fields.text → asset.content → title."""
+    fields = (asset.extra_metadata or {}).get("fields") or {}
+    for key in ("body", "text", "headline"):
+        value = fields.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    if asset.content:
+        return asset.content
+    if asset.title:
+        return asset.title
+    return ""
+
+
+async def _pause_campaign_on_oauth_revoked(
+    session: AsyncSession,
+    *,
+    campaign: Campaign,
+    channel_id: UUID,
+    provider: str,
+) -> None:
+    """E12-S03 #3: lost authorisation → pause the campaign + audit.
+
+    Direct status flip rather than a state-machine transition because
+    the SM doesn't have `live → paused` until W31 lands. Recovery = admin
+    re-OAuths + manually resumes (or W31 wires the transition properly)."""
+    before = column_snapshot(campaign)
+    campaign.status = CampaignStatus.paused
+    await session.flush()
+
+    write_audit(
+        session,
+        tenant_id=campaign.tenant_id,
+        actor_kind=current_actor_kind.get(),
+        actor_id=current_actor_id.get(),
+        entity_kind="campaign",
+        entity_id=campaign.id,
+        action="paused",
+        before_state=before,
+        after_state=column_snapshot(campaign),
+        metadata={
+            "reason": "oauth_revoked",
+            "provider": provider,
+            "channel_id": str(channel_id),
+        },
+    )
 
 
 # ---------------------------------------------------------------------------

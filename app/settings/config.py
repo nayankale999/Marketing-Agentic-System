@@ -36,6 +36,13 @@ class Settings(BaseSettings):
     hubspot_client_secret: str = ""
     hubspot_redirect_uri: str = "http://localhost:8001/api/integrations/hubspot/callback"
 
+    # LinkedIn OAuth (social connector — W30, E12-S03)
+    linkedin_client_id: str = ""
+    linkedin_client_secret: str = ""
+    linkedin_redirect_uri: str = (
+        "http://localhost:8001/api/integrations/social/linkedin/callback"
+    )
+
     # Plausible Analytics (web analytics connector — W16)
     plausible_api_key: str = ""
     plausible_site_id: str = ""

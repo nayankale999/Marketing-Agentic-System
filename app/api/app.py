@@ -22,6 +22,7 @@ from app.api import (
     ingest,
     integrations,
     integrations_email,
+    integrations_social,
     me,
     preview,
     strategy,
@@ -64,6 +65,7 @@ def create_app() -> FastAPI:
     application.include_router(approvals.router)
     application.include_router(approval_settings.router)
     application.include_router(integrations_email.router)
+    application.include_router(integrations_social.router)
     application.include_router(distribution.router)
     application.include_router(frequency_caps.router)
     application.include_router(compliance_settings.router)

@@ -988,3 +988,39 @@ class TenantComplianceSettings(Base):
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )
+
+
+class ProviderRateLimit(Base):
+    """Per-tenant per-provider send-rate config (W31, E08-S06).
+
+    Default `enabled=false` — admins opt in per provider. Full token-bucket
+    enforcement during dispatch is a polish unit; for W31 the limit drives
+    the admin surface + provides the seam for the 429 Retry-After backoff
+    that already lives in the LinkedIn/email connectors."""
+
+    __tablename__ = "provider_rate_limit"
+    __table_args__ = (
+        CheckConstraint(
+            "requests_per_minute > 0",
+            name="ck_provider_rate_limit_rpm_positive",
+        ),
+        UniqueConstraint(
+            "tenant_id", "provider", name="uq_provider_rate_limit_tenant_provider"
+        ),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, server_default=func.gen_random_uuid()
+    )
+    tenant_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("tenant.id", ondelete="CASCADE"), nullable=False
+    )
+    provider: Mapped[str] = mapped_column(String(64), nullable=False)
+    requests_per_minute: Mapped[int] = mapped_column(Integer, nullable=False)
+    enabled: Mapped[bool] = mapped_column(nullable=False, server_default="false")
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )

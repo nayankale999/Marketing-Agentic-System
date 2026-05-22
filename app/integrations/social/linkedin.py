@@ -248,7 +248,12 @@ class LinkedInConnector(SocialConnector):
                 continue
 
             if resp.status_code in _RETRYABLE_STATUS and attempt < _MAX_RETRIES:
-                await self._sleep_jittered(backoff_seconds)
+                # E08-S06 #3: honor `Retry-After` on 429 if present.
+                retry_after = _parse_retry_after(resp.headers.get("Retry-After"))
+                wait_seconds = (
+                    retry_after if retry_after is not None else backoff_seconds
+                )
+                await self._sleep_jittered(wait_seconds)
                 backoff_seconds *= 2
                 attempt += 1
                 continue
@@ -321,6 +326,39 @@ def _share_url(urn: str) -> str:
     """LinkedIn doesn't publish a stable per-share URL via the API, but the
     feed URL pattern works for org shares: /feed/update/<urn>/."""
     return f"https://www.linkedin.com/feed/update/{urn}/"
+
+
+def _parse_retry_after(value: str | None) -> float | None:
+    """Parse a `Retry-After` header value (W31, E08-S06 #3).
+
+    The header can be either an integer number of seconds OR an HTTP-date
+    timestamp. Returns `None` if the value is missing or unparseable so
+    the caller falls back to its default backoff."""
+    if not value:
+        return None
+    stripped = value.strip()
+    if not stripped:
+        return None
+    # Seconds form (most providers, including LinkedIn).
+    try:
+        seconds = float(stripped)
+        return max(seconds, 0.0)
+    except ValueError:
+        pass
+    # HTTP-date form: parse and compute delta.
+    from email.utils import parsedate_to_datetime
+
+    try:
+        target = parsedate_to_datetime(stripped)
+    except (TypeError, ValueError):
+        return None
+    if target is None:
+        return None
+    from datetime import datetime, timezone
+
+    now = datetime.now(timezone.utc)
+    delta = (target - now).total_seconds()
+    return max(delta, 0.0)
 
 
 __all__ = ["LinkedInConnector"]

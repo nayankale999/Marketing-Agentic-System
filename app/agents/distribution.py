@@ -266,6 +266,15 @@ async def dispatch_email_asset(
         raise DistributionPreconditionError(
             f"campaign {asset.campaign_id} not found"
         )
+    # E08-S07 #1/#2: paused campaign refuses dispatch. Return cleanly rather
+    # than raise so any in-flight task that flipped while paused was applied
+    # ends as a skip, not a queue retry.
+    if campaign.status == CampaignStatus.paused:
+        return {
+            "asset_id": str(asset.id),
+            "status": asset.status.value,
+            "error": "campaign_paused",
+        }
     if asset.asset_type != AssetType.email:
         raise DistributionPreconditionError(
             f"asset {asset_id} is type '{asset.asset_type.value}'; email dispatcher only handles 'email'"
@@ -529,6 +538,12 @@ async def dispatch_social_asset(
         raise DistributionPreconditionError(
             f"campaign {asset.campaign_id} not found"
         )
+    if campaign.status == CampaignStatus.paused:
+        return {
+            "asset_id": str(asset.id),
+            "status": asset.status.value,
+            "error": "campaign_paused",
+        }
 
     channel = await session.get(Channel, asset.channel_id)
     if channel is None:
@@ -702,14 +717,40 @@ async def _pause_campaign_on_oauth_revoked(
     channel_id: UUID,
     provider: str,
 ) -> None:
-    """E12-S03 #3: lost authorisation → pause the campaign + audit.
+    """E12-S03 #3: lost authorisation → pause the campaign via the W31
+    pause_campaign helper (cancels queued tasks + writes audit). Direct
+    helper call rather than the SM transition because we're inside a
+    dispatch handler whose session.begin() block would roll back the SM
+    transition on the OAuthRevokedError exception."""
+    await pause_campaign(
+        session,
+        campaign=campaign,
+        reason="oauth_revoked",
+        metadata={"provider": provider, "channel_id": str(channel_id)},
+    )
 
-    Direct status flip rather than a state-machine transition because
-    the SM doesn't have `live → paused` until W31 lands. Recovery = admin
-    re-OAuths + manually resumes (or W31 wires the transition properly)."""
+
+async def pause_campaign(
+    session: AsyncSession,
+    *,
+    campaign: Campaign,
+    reason: str = "manual",
+    metadata: dict | None = None,
+) -> None:
+    """Generic pause helper — flips status + writes audit + cancels queued
+    tasks. Use this from any non-SM context (W30 OAuth-revoke, future
+    compliance triggers). For manual API-driven pauses, go through the
+    `pause` SM transition instead so SM invariants are preserved."""
+    from app.orchestrator.queue import cancel_queued_for_campaign
+
+    if campaign.status == CampaignStatus.paused:
+        return  # idempotent
+
     before = column_snapshot(campaign)
     campaign.status = CampaignStatus.paused
     await session.flush()
+
+    await cancel_queued_for_campaign(session, campaign_id=campaign.id)
 
     write_audit(
         session,
@@ -721,12 +762,82 @@ async def _pause_campaign_on_oauth_revoked(
         action="paused",
         before_state=before,
         after_state=column_snapshot(campaign),
-        metadata={
-            "reason": "oauth_revoked",
-            "provider": provider,
-            "channel_id": str(channel_id),
-        },
+        metadata={"reason": reason, **(metadata or {})},
     )
+
+
+async def resume_distribution_for_campaign(
+    session: AsyncSession, *, campaign: Campaign
+) -> dict[str, int]:
+    """Re-enqueue dispatch for the campaign's future-slot assets and fail
+    elapsed-slot ones (W31, E08-S07 #3).
+
+    Called from the `resume` SM transition's on_enter hook. Returns a
+    summary `{requeued, elapsed_failed}` for the audit metadata.
+
+    Idempotency: a duplicate task is safe because the W28 dispatch_attempt
+    UNIQUE constraint means a second send for the same (asset, recipient)
+    short-circuits to the cached provider id."""
+    rows = (
+        await session.execute(
+            select(ContentAsset).where(
+                ContentAsset.campaign_id == campaign.id,
+                ContentAsset.status == AssetStatus.scheduled,
+            )
+        )
+    ).scalars().all()
+
+    if not rows:
+        return {"requeued": 0, "elapsed_failed": 0}
+
+    agent = await ensure_distribution_agent(session, campaign.tenant_id)
+    now = datetime.now(UTC)
+    requeued = 0
+    elapsed = 0
+
+    for asset in rows:
+        if asset.scheduled_at and asset.scheduled_at < now:
+            before = column_snapshot(asset)
+            asset.status = AssetStatus.failed
+            asset.extra_metadata = {
+                **(asset.extra_metadata or {}),
+                "skip_reason": "slot_elapsed_during_pause",
+                "elapsed_at": now.isoformat(),
+            }
+            await session.flush()
+            write_audit(
+                session,
+                tenant_id=asset.tenant_id,
+                actor_kind=current_actor_kind.get(),
+                actor_id=current_actor_id.get(),
+                entity_kind="content_asset",
+                entity_id=asset.id,
+                action="skipped_elapsed",
+                before_state=before,
+                after_state=column_snapshot(asset),
+                metadata={"reason": "slot_elapsed_during_pause"},
+            )
+            elapsed += 1
+            continue
+
+        skill = _dispatch_skill_for(asset)
+        if skill is None:
+            continue
+        await enqueue_task(
+            session,
+            tenant_id=asset.tenant_id,
+            agent_id=agent.id,
+            campaign_id=campaign.id,
+            skill_name=skill,
+            input_data={
+                "asset_id": str(asset.id),
+                "campaign_id": str(campaign.id),
+            },
+            scheduled_for=asset.scheduled_at or now,
+        )
+        requeued += 1
+
+    return {"requeued": requeued, "elapsed_failed": elapsed}
 
 
 # ---------------------------------------------------------------------------

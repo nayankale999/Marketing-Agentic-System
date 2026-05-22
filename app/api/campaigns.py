@@ -25,6 +25,9 @@ from app.api.schemas.campaign import (
     CampaignListResponse,
     CampaignOut,
     CampaignPatch,
+    PauseCampaignRequest,
+    PauseCampaignResponse,
+    ResumeCampaignResponse,
 )
 from app.audit.context import current_actor_id, current_actor_kind
 from app.audit.writer import column_snapshot, write_audit
@@ -207,3 +210,141 @@ async def apply_transition(
     except GuardFailedError as exc:
         raise HTTPException(status.HTTP_409_CONFLICT, detail=str(exc)) from exc
     return {"id": str(campaign.id), "status": campaign.status.value}
+
+
+@router.post(
+    "/{campaign_id}/pause",
+    response_model=PauseCampaignResponse,
+)
+async def pause_campaign_endpoint(
+    campaign_id: UUID,
+    body: PauseCampaignRequest,
+    _user: AppUser = Depends(require_role(UserRole.manager)),
+    db: AsyncSession = Depends(get_tenant_db),
+) -> PauseCampaignResponse:
+    """E08-S07 #1/#2: pause a live campaign + cancel its queued tasks.
+
+    The `pause` SM transition's on_enter handles the actual cancellation
+    + audit row; this endpoint validates state and returns a summary.
+    Reason ends up in the audit_log row (E08-S07 #4 hook for compliance
+    auto-pauses to share the same audit shape)."""
+    from sqlalchemy import func as sa_func
+
+    from app.db.models import Task
+
+    campaign = await db.get(Campaign, campaign_id)
+    if campaign is None:
+        raise HTTPException(
+            status.HTTP_404_NOT_FOUND, detail="campaign not found"
+        )
+
+    # Snapshot queued/awaiting count BEFORE the transition fires so we can
+    # report it in the response. The transition itself does the UPDATE.
+    queued_count = (
+        await db.execute(
+            select(sa_func.count()).select_from(Task).where(
+                Task.campaign_id == campaign.id,
+                Task.status.in_(["queued", "awaiting_retry"]),
+            )
+        )
+    ).scalar_one()
+
+    try:
+        await campaign_sm.apply(db, campaign, "pause")
+    except UnknownTransitionError as exc:
+        raise HTTPException(
+            status.HTTP_409_CONFLICT,
+            detail=f"campaign in '{campaign.status.value}' cannot be paused: {exc}",
+        ) from exc
+    except GuardFailedError as exc:
+        raise HTTPException(status.HTTP_409_CONFLICT, detail=str(exc)) from exc
+
+    # Stamp the reason into a follow-up audit so the trail captures intent.
+    write_audit(
+        db,
+        tenant_id=campaign.tenant_id,
+        actor_kind=current_actor_kind.get(),
+        actor_id=current_actor_id.get(),
+        entity_kind="campaign",
+        entity_id=campaign.id,
+        action="pause_reason",
+        before_state=None,
+        after_state=None,
+        metadata={"reason": body.reason, "cancelled_tasks": int(queued_count)},
+    )
+
+    return PauseCampaignResponse(
+        campaign_id=campaign.id,
+        status=campaign.status.value,
+        reason=body.reason,
+        cancelled_tasks=int(queued_count),
+    )
+
+
+@router.post(
+    "/{campaign_id}/resume",
+    response_model=ResumeCampaignResponse,
+)
+async def resume_campaign_endpoint(
+    campaign_id: UUID,
+    _user: AppUser = Depends(require_role(UserRole.manager)),
+    db: AsyncSession = Depends(get_tenant_db),
+) -> ResumeCampaignResponse:
+    """E08-S07 #3: resume a paused campaign. The `resume` SM transition's
+    on_enter re-enqueues future-slot assets and flips elapsed ones to
+    failed; we surface those counts in the response."""
+    from app.agents.distribution import resume_distribution_for_campaign
+
+    campaign = await db.get(Campaign, campaign_id)
+    if campaign is None:
+        raise HTTPException(
+            status.HTTP_404_NOT_FOUND, detail="campaign not found"
+        )
+
+    if campaign.status != CampaignStatus.paused:
+        raise HTTPException(
+            status.HTTP_409_CONFLICT,
+            detail=f"campaign in '{campaign.status.value}' is not paused",
+        )
+
+    # Run the SM transition. Its on_enter calls resume_distribution_for_campaign
+    # which does the requeue + elapsed-skip; we re-run it here to capture
+    # the summary numbers (the on_enter is idempotent — second call is a
+    # no-op since the scheduled assets have already moved on).
+    try:
+        await campaign_sm.apply(db, campaign, "resume")
+    except (UnknownTransitionError, GuardFailedError) as exc:
+        raise HTTPException(status.HTTP_409_CONFLICT, detail=str(exc)) from exc
+
+    # We need the summary. Since the on_enter already ran, the second call
+    # will return {0, 0} — capture via a state-aware query against
+    # content_asset and task tables instead.
+    from sqlalchemy import func as sa_func
+
+    from app.db.enums import AssetStatus
+    from app.db.models import ContentAsset, Task
+
+    requeued = (
+        await db.execute(
+            select(sa_func.count()).select_from(Task).where(
+                Task.campaign_id == campaign.id,
+                Task.status == "queued",
+            )
+        )
+    ).scalar_one()
+    elapsed = (
+        await db.execute(
+            select(sa_func.count()).select_from(ContentAsset).where(
+                ContentAsset.campaign_id == campaign.id,
+                ContentAsset.extra_metadata["skip_reason"].astext
+                == "slot_elapsed_during_pause",
+            )
+        )
+    ).scalar_one()
+
+    return ResumeCampaignResponse(
+        campaign_id=campaign.id,
+        status=campaign.status.value,
+        requeued=int(requeued),
+        elapsed_failed=int(elapsed),
+    )

@@ -25,6 +25,7 @@ from app.api import (
     integrations_social,
     me,
     preview,
+    provider_rate_limits,
     strategy,
     tenant_constraints,
     unsubscribe,
@@ -70,6 +71,7 @@ def create_app() -> FastAPI:
     application.include_router(frequency_caps.router)
     application.include_router(compliance_settings.router)
     application.include_router(unsubscribe.router)
+    application.include_router(provider_rate_limits.router)
     application.include_router(tenant_constraints.router)
     init_observability(app=application)
     return application

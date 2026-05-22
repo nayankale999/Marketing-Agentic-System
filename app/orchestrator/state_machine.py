@@ -466,3 +466,55 @@ campaign_sm.register(
         guard=_any_required_asset_rejected,
     )
 )
+
+
+async def _cancel_queued_on_pause(
+    session: AsyncSession, campaign: Campaign
+) -> None:
+    """on_enter for `pause` (W31, E08-S07 #2). Cancels queued + awaiting_retry
+    tasks for the campaign. Running tasks are intentionally left alone — the
+    AC's literal reading is 'currently-executing tasks complete'."""
+    from app.orchestrator.queue import cancel_queued_for_campaign
+
+    await cancel_queued_for_campaign(session, campaign_id=campaign.id)
+
+
+# Pause can fire from any active campaign state. We register one transition
+# per (from_state, "pause") because the SM uses (from, name) as the key.
+for _pause_from in (
+    CampaignStatus.live,
+    CampaignStatus.optimising,
+    CampaignStatus.ready_to_launch,
+):
+    campaign_sm.register(
+        Transition(
+            name="pause",
+            from_state=_pause_from,
+            to_state=CampaignStatus.paused,
+            on_enter=_cancel_queued_on_pause,
+        )
+    )
+
+
+async def _resume_distribution(
+    session: AsyncSession, campaign: Campaign
+) -> None:
+    """on_enter for `resume` (W31, E08-S07 #3). For every scheduled asset
+    on the campaign:
+      - elapsed slot → flip to `failed` with `skip_reason=slot_elapsed_during_pause`
+      - future slot → re-enqueue a dispatch task (idempotent via W28's
+        dispatch_attempt UNIQUE constraint, so duplicates are safe)
+    """
+    from app.agents.distribution import resume_distribution_for_campaign
+
+    await resume_distribution_for_campaign(session, campaign=campaign)
+
+
+campaign_sm.register(
+    Transition(
+        name="resume",
+        from_state=CampaignStatus.paused,
+        to_state=CampaignStatus.live,
+        on_enter=_resume_distribution,
+    )
+)

@@ -77,3 +77,25 @@ class CampaignListResponse(BaseModel):
     total: int
     limit: int
     offset: int
+
+
+class PauseCampaignRequest(BaseModel):
+    """Body for POST /api/campaigns/{id}/pause (W31, E08-S07)."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    reason: str = Field(default="manual", max_length=200)
+
+
+class PauseCampaignResponse(BaseModel):
+    campaign_id: UUID
+    status: str
+    reason: str
+    cancelled_tasks: int
+
+
+class ResumeCampaignResponse(BaseModel):
+    campaign_id: UUID
+    status: str
+    requeued: int
+    elapsed_failed: int

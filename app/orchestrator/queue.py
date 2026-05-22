@@ -222,3 +222,30 @@ async def reap_expired_leases(session: AsyncSession) -> int:
     )
     # CursorResult.rowcount is set for UPDATE; mypy sees the base Result type.
     return result.rowcount or 0  # type: ignore[attr-defined]
+
+
+async def cancel_queued_for_campaign(
+    session: AsyncSession, *, campaign_id: UUID
+) -> int:
+    """Cancel every queued/awaiting_retry task for a campaign (W31, E08-S07 #2).
+
+    Running tasks are intentionally NOT touched — the AC's literal reading
+    is 'currently-executing tasks complete (sends do not stop mid-batch)
+    but no new batch is started'. Workers will finish their batch, then
+    see no more queued tasks and the campaign in `paused` state.
+
+    Returns the number of tasks cancelled."""
+    result = await session.execute(
+        update(Task)
+        .where(
+            Task.campaign_id == campaign_id,
+            Task.status.in_([TaskStatus.queued, TaskStatus.awaiting_retry]),
+        )
+        .values(
+            status=TaskStatus.cancelled,
+            completed_at=_now(),
+            leased_until=None,
+            worker_id=None,
+        )
+    )
+    return result.rowcount or 0  # type: ignore[attr-defined]

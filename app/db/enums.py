@@ -154,3 +154,16 @@ class ComplianceSeverity(enum.StrEnum):
 
     warn = "warn"
     block = "block"
+
+
+class ApprovalRejectionCategory(enum.StrEnum):
+    """Common buckets a reviewer assigns alongside the free-text reason on a
+    reject (W25, E07-S02 #3). Used as a hint to the regenerate prompt and
+    later as a clustering signal for E07-S05 rejection-pattern analytics."""
+
+    off_voice = "off_voice"
+    inaccurate = "inaccurate"
+    wrong_audience = "wrong_audience"
+    length = "length"
+    compliance = "compliance"
+    other = "other"

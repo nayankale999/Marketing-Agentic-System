@@ -265,11 +265,104 @@ async def _all_required_assets_drafted(
     return compliance_blocking is None
 
 
+async def _flip_drafted_assets_to_pending_approval(
+    session: AsyncSession, campaign: Campaign
+) -> None:
+    """on_enter for `submit_for_approval` (W25, E07-S01): move every required
+    drafted asset into `pending_approval` so it surfaces in the manager's
+    queue. Idempotent — re-running (after a regenerate→re-submit cycle)
+    only flips the assets that came back to `drafted`."""
+    from datetime import UTC, datetime  # local import — only used here
+
+    rows = (
+        await session.execute(
+            select(ContentAsset).where(
+                ContentAsset.campaign_id == campaign.id,
+                ContentAsset.is_required.is_(True),
+                ContentAsset.status == AssetStatus.drafted,
+            )
+        )
+    ).scalars().all()
+    if not rows:
+        return
+    now = datetime.now(UTC)
+    for row in rows:
+        row.status = AssetStatus.pending_approval
+        row.updated_at = now  # surfaces "submitted_at" ordering in the queue
+    await session.flush()
+
+
 campaign_sm.register(
     Transition(
         name="submit_for_approval",
         from_state=CampaignStatus.content_in_production,
         to_state=CampaignStatus.approval_pending,
         guard=_all_required_assets_drafted,
+        on_enter=_flip_drafted_assets_to_pending_approval,
+    )
+)
+
+
+async def _all_required_assets_approved(
+    session: AsyncSession, campaign: Campaign
+) -> bool:
+    """Guard for `start_launch` (W25): every required asset must be `approved`.
+    Empty asset set is rejected — you can't launch a campaign with no content."""
+    total_required = (
+        await session.execute(
+            select(ContentAsset.id).where(
+                ContentAsset.campaign_id == campaign.id,
+                ContentAsset.is_required.is_(True),
+            )
+        )
+    ).first()
+    if total_required is None:
+        return False
+
+    not_yet_approved = (
+        await session.execute(
+            select(ContentAsset.id).where(
+                ContentAsset.campaign_id == campaign.id,
+                ContentAsset.is_required.is_(True),
+                ContentAsset.status != AssetStatus.approved,
+            )
+        )
+    ).first()
+    return not_yet_approved is None
+
+
+campaign_sm.register(
+    Transition(
+        name="start_launch",
+        from_state=CampaignStatus.approval_pending,
+        to_state=CampaignStatus.ready_to_launch,
+        guard=_all_required_assets_approved,
+    )
+)
+
+
+async def _any_required_asset_rejected(
+    session: AsyncSession, campaign: Campaign
+) -> bool:
+    """Guard for `regenerate_after_rejection` (W25): at least one required
+    asset is in `rejected` and needs to cycle back through content production."""
+    rejected = (
+        await session.execute(
+            select(ContentAsset.id).where(
+                ContentAsset.campaign_id == campaign.id,
+                ContentAsset.is_required.is_(True),
+                ContentAsset.status == AssetStatus.rejected,
+            )
+        )
+    ).first()
+    return rejected is not None
+
+
+campaign_sm.register(
+    Transition(
+        name="regenerate_after_rejection",
+        from_state=CampaignStatus.approval_pending,
+        to_state=CampaignStatus.content_in_production,
+        guard=_any_required_asset_rejected,
     )
 )

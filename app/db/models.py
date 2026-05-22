@@ -34,6 +34,7 @@ from app.db.enums import (
     AbTestStatus,
     AgentKind,
     AgentStatus,
+    ApprovalDecision,
     AssetStatus,
     AssetType,
     CampaignStatus,
@@ -109,6 +110,12 @@ _ASSET_STATUS = PgEnum(
 _AB_TEST_STATUS = PgEnum(
     AbTestStatus,
     name="ab_test_status",
+    create_type=False,
+    values_callable=lambda e: [m.value for m in e],
+)
+_APPROVAL_DECISION = PgEnum(
+    ApprovalDecision,
+    name="approval_decision",
     create_type=False,
     values_callable=lambda e: [m.value for m in e],
 )
@@ -740,5 +747,36 @@ class AbTest(Base):
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )
     updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+
+class ApprovalDecisionLog(Base):
+    """One row per manager decision on a content_asset (W25, E07-S02).
+
+    Append-only by convention: every approve / approve_with_edits / reject
+    writes a row; the asset's current status is the projection of the
+    latest decision. `edits` carries the previous-vs-current diff when the
+    reviewer rewrote copy inline so the audit trail preserves what changed."""
+
+    __tablename__ = "approval_decision_log"
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, server_default=func.gen_random_uuid()
+    )
+    content_asset_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("content_asset.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    reviewer_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("app_user.id", ondelete="RESTRICT"), nullable=False
+    )
+    decision: Mapped[ApprovalDecision] = mapped_column(
+        _APPROVAL_DECISION, nullable=False
+    )
+    reason: Mapped[str | None] = mapped_column(Text)
+    edits: Mapped[dict[str, Any] | None] = mapped_column(JSONB)
+    decided_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )

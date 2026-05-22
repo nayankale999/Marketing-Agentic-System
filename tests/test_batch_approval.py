@@ -273,7 +273,10 @@ async def test_batch_approve_writes_per_asset_decisions(
                 select(ContentAsset).where(ContentAsset.campaign_id == c)
             )
         ).scalars().all()
-        assert {a.status for a in assets} == {AssetStatus.approved}
+        # After the batch lands and the campaign auto-advances to
+        # ready_to_launch, W28's start_launch.on_enter schedules the assets
+        # — so they show up here as `scheduled`, not `approved`.
+        assert {a.status for a in assets} == {AssetStatus.scheduled}
 
         # Scope to this test's assets — the testcontainer is session-scoped.
         decisions = (

@@ -363,12 +363,80 @@ async def _all_required_assets_approved(
     return not_yet_approved is None
 
 
+async def _schedule_approved_assets(
+    session: AsyncSession, campaign: Campaign
+) -> None:
+    """on_enter for `start_launch` (W28, E08-S01): every approved asset gets
+    its slot from the touchpoint calendar and a dispatch task enqueued.
+    Imported lazily because distribution imports the state machine for its
+    `_maybe_go_live` hook."""
+    from app.agents.distribution import schedule_approved_assets
+
+    await schedule_approved_assets(session, campaign=campaign)
+
+
 campaign_sm.register(
     Transition(
         name="start_launch",
         from_state=CampaignStatus.approval_pending,
         to_state=CampaignStatus.ready_to_launch,
         guard=_all_required_assets_approved,
+        on_enter=_schedule_approved_assets,
+    )
+)
+
+
+async def _ready_to_go_live(
+    session: AsyncSession, campaign: Campaign
+) -> bool:
+    """Guard for `start_live` (W28): start_date must be reached AND no
+    required asset is still in pre-scheduled state. Assets already in
+    `published` count as 'past scheduling' — fine to advance."""
+    from datetime import UTC, datetime
+
+    today = datetime.now(UTC).date()
+    if campaign.start_date > today:
+        return False
+
+    total_required = (
+        await session.execute(
+            select(ContentAsset.id).where(
+                ContentAsset.campaign_id == campaign.id,
+                ContentAsset.is_required.is_(True),
+            )
+        )
+    ).first()
+    if total_required is None:
+        return False
+
+    blocking = (
+        await session.execute(
+            select(ContentAsset.id).where(
+                ContentAsset.campaign_id == campaign.id,
+                ContentAsset.is_required.is_(True),
+                ContentAsset.status.in_(
+                    [
+                        AssetStatus.requested,
+                        AssetStatus.generating,
+                        AssetStatus.drafted,
+                        AssetStatus.pending_approval,
+                        AssetStatus.approved,
+                        AssetStatus.rejected,
+                        AssetStatus.failed,
+                    ]
+                ),
+            )
+        )
+    ).first()
+    return blocking is None
+
+
+campaign_sm.register(
+    Transition(
+        name="start_live",
+        from_state=CampaignStatus.ready_to_launch,
+        to_state=CampaignStatus.live,
+        guard=_ready_to_go_live,
     )
 )
 

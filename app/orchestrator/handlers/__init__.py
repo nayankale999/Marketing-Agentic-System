@@ -8,6 +8,9 @@ from app.orchestrator.handlers.audience import audience_materialise_handler
 from app.orchestrator.handlers.content_creator import (
     content_creator_generate_asset_handler,
 )
+from app.orchestrator.handlers.distribution import (
+    distribution_dispatch_email_handler,
+)
 from app.orchestrator.handlers.echo import echo_handler
 from app.orchestrator.handlers.strategist import campaign_strategist_propose_handler
 from app.orchestrator.handlers.tool import register_tool_handlers
@@ -28,6 +31,9 @@ def register_builtin_handlers() -> None:
     register_handler(
         "content_creator.generate_asset", content_creator_generate_asset_handler
     )
+    register_handler(
+        "distribution.dispatch_email", distribution_dispatch_email_handler
+    )
     # Tools must be registered before their handlers can be built.
     register_builtin_tools()
     register_tool_handlers()
@@ -37,6 +43,7 @@ __all__ = [
     "audience_materialise_handler",
     "campaign_strategist_propose_handler",
     "content_creator_generate_asset_handler",
+    "distribution_dispatch_email_handler",
     "echo_handler",
     "register_builtin_handlers",
     "register_tool_handlers",

@@ -860,3 +860,56 @@ class SuppressionEntry(Base):
     suppressed_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )
+
+
+class DispatchAttempt(Base):
+    """One row per (asset × recipient) attempt the Distribution agent makes
+    (W28, E08-S02/05).
+
+    The unique `(tenant_id, idempotency_key)` is the safety on retries —
+    a worker re-running the same dispatch task hits the conflict and reads
+    the existing row's status instead of re-sending. `provider_message_id`
+    is the join key the W27 webhook uses to reconcile delivery/bounce events
+    against the original attempt."""
+
+    __tablename__ = "dispatch_attempt"
+    __table_args__ = (
+        CheckConstraint(
+            "status IN ('sent', 'suppressed', 'rejected', 'failed')",
+            name="ck_dispatch_attempt_status",
+        ),
+        UniqueConstraint(
+            "tenant_id",
+            "idempotency_key",
+            name="uq_dispatch_attempt_tenant_idem_key",
+        ),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, server_default=func.gen_random_uuid()
+    )
+    tenant_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("tenant.id", ondelete="CASCADE"), nullable=False
+    )
+    content_asset_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("content_asset.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    # audience_member uses a composite PK, so this is a soft reference
+    # rather than a foreign key — useful for debugging mismatches.
+    audience_external_id: Mapped[str | None] = mapped_column(String(200))
+    recipient_identifier: Mapped[str] = mapped_column(CITEXT, nullable=False)
+    idempotency_key: Mapped[str] = mapped_column(String(200), nullable=False)
+    provider: Mapped[str] = mapped_column(String(64), nullable=False)
+    provider_message_id: Mapped[str | None] = mapped_column(String(200))
+    status: Mapped[str] = mapped_column(String(20), nullable=False)
+    attempt_count: Mapped[int] = mapped_column(Integer, nullable=False, server_default="1")
+    last_error: Mapped[str | None] = mapped_column(Text)
+    sent_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )

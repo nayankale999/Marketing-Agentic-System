@@ -4,7 +4,17 @@ from fastapi import FastAPI
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.middleware.sessions import SessionMiddleware
 
-from app.api import _protected, audiences, auth, campaigns, health, ingest, integrations, me
+from app.api import (
+    _protected,
+    audiences,
+    auth,
+    brand_voice,
+    campaigns,
+    health,
+    ingest,
+    integrations,
+    me,
+)
 from app.audit import register_listeners
 from app.observability import init_observability, tag_span_with_actor
 from app.settings.config import get_settings
@@ -27,6 +37,7 @@ def create_app() -> FastAPI:
     application.include_router(audiences.campaigns_router)
     application.include_router(audiences.audiences_router)
     application.include_router(ingest.router)
+    application.include_router(brand_voice.router)
     init_observability(app=application)
     return application
 

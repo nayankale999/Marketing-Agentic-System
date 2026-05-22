@@ -17,6 +17,7 @@ from app.api import (
     ingest,
     integrations,
     me,
+    preview,
     strategy,
     tenant_constraints,
 )
@@ -51,6 +52,8 @@ def create_app() -> FastAPI:
     application.include_router(ab_tests.campaigns_router)
     application.include_router(ab_tests.ab_tests_router)
     application.include_router(compliance_rules.router)
+    application.include_router(preview.content_router)
+    application.include_router(preview.public_router)
     application.include_router(tenant_constraints.router)
     init_observability(app=application)
     return application

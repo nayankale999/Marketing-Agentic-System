@@ -15,6 +15,9 @@ ALLOWLIST: set[str] = {
     "/api/auth/login",
     "/api/auth/callback",
     "/api/auth/logout",
+    # Preview share-link consumer (W24, E06-S07 #4): the signed token IS the
+    # credential, so the route intentionally bypasses require_role.
+    "/api/preview-links/{token}",
 }
 
 

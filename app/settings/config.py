@@ -57,6 +57,15 @@ class Settings(BaseSettings):
     # is older than this are flagged stale in the audience composition view.
     audience_member_freshness_ttl_days: int = 30
 
+    # Asset preview share-link signing (W24, E06-S07 #4). Empty falls back to
+    # `session_secret` for dev convenience; in prod override so share-link
+    # tokens don't share signing material with session cookies.
+    preview_share_secret: str = ""
+    preview_share_ttl_days: int = 7
+
+    def effective_preview_share_secret(self) -> str:
+        return self.preview_share_secret or self.session_secret
+
 
 @lru_cache(maxsize=1)
 def get_settings() -> Settings:

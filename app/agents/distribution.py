@@ -36,6 +36,7 @@ from app.db.enums import (
     AssetStatus,
     AssetType,
     CampaignStatus,
+    ChannelPlatform,
 )
 from app.db.models import (
     Agent,
@@ -44,9 +45,11 @@ from app.db.models import (
     Campaign,
     ContentAsset,
     DispatchAttempt,
+    FrequencyCapSetting,
     IntegrationCredential,
     StrategyProposal,
     StrategyTouchpoint,
+    TenantComplianceSettings,
 )
 from app.integrations.credentials import get_encrypted_payload
 from app.integrations.email import (
@@ -256,8 +259,23 @@ async def dispatch_email_asset(
         recipients=[m.payload.get("email", "") for m in audience_members if m.payload],
     )
 
+    # E08-S04 #2: frequency cap check. Returns the set of recipients that
+    # have already been sent enough times in the configured window. Empty
+    # if no cap is configured for email or `enabled=false`.
+    capped_recipients = await _capped_recipients(
+        session,
+        tenant_id=asset.tenant_id,
+        channel_platform=ChannelPlatform.email,
+        candidates=[
+            str((m.payload or {}).get("email", "")).strip().lower()
+            for m in audience_members
+            if m.payload
+        ],
+    )
+
     to_send: list[tuple[AudienceMember, str]] = []
     deduped: list[tuple[AudienceMember, str]] = []
+    capped: list[tuple[AudienceMember, str]] = []
     for member in audience_members:
         email = str((member.payload or {}).get("email", "")).strip().lower()
         if not email:
@@ -268,9 +286,32 @@ async def dispatch_email_asset(
         if email in recent_sends_by_recipient:
             deduped.append((member, email))
             continue
+        if email in capped_recipients:
+            capped.append((member, email))
+            continue
         to_send.append((member, email))
 
+    # Write one `skipped` attempt row per capped recipient so the audit
+    # trail captures the skip (E08-S04 #2: "skip is logged").
+    for member, email in capped:
+        await _upsert_dispatch_attempt(
+            session,
+            tenant_id=asset.tenant_id,
+            content_asset_id=asset.id,
+            audience_external_id=member.external_id,
+            recipient_identifier=email,
+            idempotency_key=_idempotency_key(asset.id, email),
+            provider=connector.provider,
+            provider_message_id=None,
+            status="skipped",
+            last_error="frequency_cap",
+            sent_at=None,
+        )
+
     from_email = payload.get("default_from_email") or ""
+    compliance_footer = await _build_compliance_footer(
+        session, tenant_id=asset.tenant_id
+    )
     tool = EmailDispatchTool(
         connector=connector, session=session, tenant_id=asset.tenant_id
     )
@@ -278,24 +319,34 @@ async def dispatch_email_asset(
     sent_count = 0
     suppressed_count = 0
     rejected_count = 0
+    skipped_count = len(capped)
 
     if to_send:
         message = _message_from_asset(asset)
-        audience_batch = [
-            {
-                "email": email,
-                "merge_fields": _string_only_payload(member.payload or {}),
-            }
-            for member, email in to_send
-        ]
-        result = await tool.call(
-            {
-                "from_email": from_email,
-                "audience_batch": audience_batch,
-                "message": message,
-                "idempotency_key": f"asset:{asset.id}",
-            }
+        # Per-recipient unsubscribe URLs are merged in below — the footer
+        # carries `{{unsubscribe_url}}` placeholders that the connector
+        # substitutes per personalization.
+        signer = (
+            await _build_unsubscribe_signer(session, tenant_id=asset.tenant_id)
+            if compliance_footer
+            else None
         )
+        audience_batch = []
+        for member, email in to_send:
+            merge_fields = _string_only_payload(member.payload or {})
+            if signer is not None:
+                merge_fields["unsubscribe_url"] = signer(email)
+            audience_batch.append({"email": email, "merge_fields": merge_fields})
+
+        tool_inputs: dict[str, Any] = {
+            "from_email": from_email,
+            "audience_batch": audience_batch,
+            "message": message,
+            "idempotency_key": f"asset:{asset.id}",
+        }
+        if compliance_footer:
+            tool_inputs["compliance_footer"] = compliance_footer
+        result = await tool.call(tool_inputs)
 
         accepted_map: dict[str, str | None] = {
             entry["email"].lower(): entry.get("provider_message_id")
@@ -348,14 +399,27 @@ async def dispatch_email_asset(
                 sent_at=sent_at,
             )
 
-    # Even if nothing new was sent, the dedup count is meaningful — capture it.
-    summary = {
+    # Even if nothing new was sent, the dedup + skip counts are meaningful.
+    summary: dict[str, Any] = {
         "sent": sent_count,
         "suppressed": suppressed_count,
         "rejected": rejected_count,
+        "skipped": skipped_count,
         "deduped": len(deduped),
         "audience_size": len(audience_members),
     }
+    # E08-S04 #4: all-skipped → published with `skip_reason` recorded.
+    # We pick the dominant reason among (skipped, suppressed) so the
+    # operator can tell whether caps or the suppression list ate the send.
+    if sent_count == 0 and (skipped_count + suppressed_count + rejected_count) > 0:
+        if skipped_count >= suppressed_count and skipped_count >= rejected_count:
+            summary["skip_reason"] = "frequency_cap"
+        elif suppressed_count >= rejected_count:
+            summary["skip_reason"] = "suppressed"
+        else:
+            summary["skip_reason"] = "rejected"
+    if compliance_footer:
+        summary["compliance_footer_injected"] = True
     before = column_snapshot(asset)
     asset.status = AssetStatus.published
     asset.published_at = datetime.now(UTC)
@@ -586,6 +650,118 @@ async def _upsert_dispatch_attempt(
         )
     )
     await session.execute(stmt)
+
+
+async def _capped_recipients(
+    session: AsyncSession,
+    *,
+    tenant_id: UUID,
+    channel_platform: ChannelPlatform,
+    candidates: list[str],
+) -> set[str]:
+    """Return the set of recipients that have hit the configured frequency
+    cap (W29, E08-S04 #2). Empty set when no cap is configured or
+    `enabled=false` for this channel."""
+    normalised = {c.strip().lower() for c in candidates if c}
+    if not normalised:
+        return set()
+
+    setting = (
+        await session.execute(
+            select(FrequencyCapSetting).where(
+                FrequencyCapSetting.tenant_id == tenant_id,
+                FrequencyCapSetting.channel_platform == channel_platform,
+                FrequencyCapSetting.enabled.is_(True),
+            )
+        )
+    ).scalar_one_or_none()
+    if setting is None:
+        return set()
+
+    window_start = datetime.now(UTC) - timedelta(days=setting.window_days)
+    rows = (
+        await session.execute(
+            select(
+                DispatchAttempt.recipient_identifier,
+                func.count(DispatchAttempt.id).label("send_count"),
+            )
+            .where(
+                DispatchAttempt.tenant_id == tenant_id,
+                DispatchAttempt.status == "sent",
+                DispatchAttempt.sent_at >= window_start,
+                DispatchAttempt.recipient_identifier.in_(normalised),
+            )
+            .group_by(DispatchAttempt.recipient_identifier)
+            .having(
+                func.count(DispatchAttempt.id) >= setting.max_sends_per_recipient
+            )
+        )
+    ).all()
+    return {str(r[0]).lower() for r in rows}
+
+
+async def _build_unsubscribe_signer(
+    session: AsyncSession, *, tenant_id: UUID
+):
+    """Return an async-resolved callable `(email: str) -> url: str` that
+    generates a per-recipient unsubscribe URL. The URL embeds a signed
+    `(tenant_id, channel_platform, identifier)` token that the public
+    `/api/unsubscribe/{token}` endpoint verifies."""
+    from app.settings.config import get_settings
+
+    settings_row = (
+        await session.execute(
+            select(TenantComplianceSettings).where(
+                TenantComplianceSettings.tenant_id == tenant_id
+            )
+        )
+    ).scalar_one_or_none()
+    secret = (settings_row.unsubscribe_secret if settings_row else None) or (
+        get_settings().effective_preview_share_secret()
+    )
+
+    from itsdangerous import URLSafeSerializer
+
+    serializer = URLSafeSerializer(secret_key=secret, salt="email-unsubscribe")
+    tid = str(tenant_id)
+
+    def _build(email: str) -> str:
+        token = serializer.dumps(
+            {
+                "tenant_id": tid,
+                "channel_platform": "email",
+                "identifier": email.lower(),
+            }
+        )
+        return f"https://app.example.com/api/unsubscribe/{token}"
+
+    return _build
+
+
+async def _build_compliance_footer(
+    session: AsyncSession, *, tenant_id: UUID
+) -> dict[str, str] | None:
+    """Build the per-recipient CAN-SPAM footer payload for the dispatch tool
+    (W29, E16-S04 #1).
+
+    Returns a `{unsubscribe_url, postal_address}` dict where `unsubscribe_url`
+    is a merge-field placeholder (`{{unsubscribe_url}}`) — the connector
+    substitutes the per-recipient URL from `EmailRecipient.merge_fields`
+    at send time. Returns None when no compliance settings exist (the
+    caller skips footer injection)."""
+    settings = (
+        await session.execute(
+            select(TenantComplianceSettings).where(
+                TenantComplianceSettings.tenant_id == tenant_id
+            )
+        )
+    ).scalar_one_or_none()
+    if settings is None or not settings.postal_address:
+        return None
+    return {
+        "unsubscribe_url": "{{unsubscribe_url}}",
+        "postal_address": settings.postal_address,
+    }
 
 
 __all__ = [

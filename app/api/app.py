@@ -14,8 +14,10 @@ from app.api import (
     brand_voice,
     campaigns,
     compliance_rules,
+    compliance_settings,
     content_assets,
     distribution,
+    frequency_caps,
     health,
     ingest,
     integrations,
@@ -24,6 +26,7 @@ from app.api import (
     preview,
     strategy,
     tenant_constraints,
+    unsubscribe,
 )
 from app.audit import register_listeners
 from app.observability import init_observability, tag_span_with_actor
@@ -62,6 +65,9 @@ def create_app() -> FastAPI:
     application.include_router(approval_settings.router)
     application.include_router(integrations_email.router)
     application.include_router(distribution.router)
+    application.include_router(frequency_caps.router)
+    application.include_router(compliance_settings.router)
+    application.include_router(unsubscribe.router)
     application.include_router(tenant_constraints.router)
     init_observability(app=application)
     return application

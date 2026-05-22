@@ -913,3 +913,78 @@ class DispatchAttempt(Base):
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )
+
+
+class FrequencyCapSetting(Base):
+    """Per-tenant per-channel send-cap config (W29, E08-S04 #2).
+
+    Default `enabled=False` so existing tenants don't get behavior changes
+    on upgrade — admins opt in per channel."""
+
+    __tablename__ = "frequency_cap_setting"
+    __table_args__ = (
+        CheckConstraint(
+            "max_sends_per_recipient > 0",
+            name="ck_frequency_cap_setting_max_positive",
+        ),
+        CheckConstraint(
+            "window_days > 0",
+            name="ck_frequency_cap_setting_window_positive",
+        ),
+        UniqueConstraint(
+            "tenant_id",
+            "channel_platform",
+            name="uq_frequency_cap_setting_tenant_channel",
+        ),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, server_default=func.gen_random_uuid()
+    )
+    tenant_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("tenant.id", ondelete="CASCADE"), nullable=False
+    )
+    channel_platform: Mapped[ChannelPlatform] = mapped_column(
+        _CHANNEL_PLATFORM, nullable=False
+    )
+    max_sends_per_recipient: Mapped[int] = mapped_column(
+        Integer, nullable=False, server_default="3"
+    )
+    window_days: Mapped[int] = mapped_column(Integer, nullable=False, server_default="7")
+    enabled: Mapped[bool] = mapped_column(nullable=False, server_default="false")
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+
+class TenantComplianceSettings(Base):
+    """Per-tenant CAN-SPAM / unsubscribe config (W29, E16-S04).
+
+    `postal_address` lands in the auto-injected CAN-SPAM footer; missing
+    config means the footer falls back to a generic placeholder + a
+    flagged warning in the dispatch metadata. `unsubscribe_secret` signs
+    the public unsubscribe URLs — rotating it invalidates every URL
+    already in the wild, which is the documented revoke mechanism."""
+
+    __tablename__ = "tenant_compliance_settings"
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, server_default=func.gen_random_uuid()
+    )
+    tenant_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("tenant.id", ondelete="CASCADE"),
+        nullable=False,
+        unique=True,
+    )
+    postal_address: Mapped[str | None] = mapped_column(Text)
+    unsubscribe_secret: Mapped[str | None] = mapped_column(String(200))
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )

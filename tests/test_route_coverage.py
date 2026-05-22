@@ -21,6 +21,9 @@ ALLOWLIST: set[str] = {
     # Email provider webhook (W27, E12-S02 #2): shared-secret auth via the
     # X-MAS-Webhook-Secret header; no OIDC session.
     "/api/integrations/email/webhook/{tenant_id}",
+    # Public unsubscribe (W29, E16-S04 #2): the signed token IS the credential
+    # — recipients clicking from an email footer don't have an OIDC session.
+    "/api/unsubscribe/{token}",
 }
 
 

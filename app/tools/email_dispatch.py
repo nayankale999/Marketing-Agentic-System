@@ -1,15 +1,22 @@
-"""`email.dispatch` tool (W27, E11-S06).
+"""`email.dispatch` tool (W27, E11-S06, extended in W29 for E16-S04).
 
 The cross-provider concerns the agent shouldn't re-implement per provider:
 
   * suppression-list filtering — recipients in `suppression_entry` are
-    dropped pre-send and surfaced as `{reason: "suppressed"}` rejections
+    dropped pre-send and surfaced as `{reason: "suppressed"}` rejections.
+    Skipped when `transactional=True` (W29, E16-S04 #4) for one-time
+    transactional sends (DSAR responses etc.) — caller is responsible for
+    the audit tag.
   * client-side sender + recipient validation — bogus addresses and
-    unverified From values are rejected before reaching the provider
+    unverified From values are rejected before reaching the provider.
   * forbidden-header guard — caller can't override provider-managed
-    headers like `X-Mailer` or `Return-Path`
+    headers like `X-Mailer` or `Return-Path`.
+  * CAN-SPAM footer (W29, E16-S04 #1) — when the caller passes a
+    `compliance_footer` block, we append a footer with the unsubscribe
+    URL + postal address to both html_body and text_body if they aren't
+    already present. The dispatch agent builds the per-recipient URL.
   * normalized result shape — `{batch_id, provider, accepted_count,
-    rejected_count, per_message_ids, rejections}` regardless of provider
+    rejected_count, per_message_ids, rejections}` regardless of provider.
 
 Unlike W17/W18 this tool is NOT registered in the global tool registry —
 it needs a per-tenant connector + DB session at call time. The W28
@@ -184,15 +191,27 @@ class EmailDispatchTool(Tool):
                 f"from_email '{from_email}' is not in verified_senders"
             )
 
-        message = self._build_message(inputs.get("message") or {})
+        transactional = bool(inputs.get("transactional", False))
+        compliance_footer = inputs.get("compliance_footer") or {}
+        message = self._build_message(
+            inputs.get("message") or {},
+            compliance_footer=compliance_footer if not transactional else None,
+        )
 
         raw_recipients = inputs.get("audience_batch") or []
         if not isinstance(raw_recipients, list) or not raw_recipients:
             raise DispatchValidationError("audience_batch must be a non-empty list")
 
-        suppressed = await self._load_suppressed_emails(
-            [str(r.get("email", "")) for r in raw_recipients if isinstance(r, dict)]
-        )
+        # E16-S04 #4: transactional sends bypass suppression filtering so
+        # DSAR responses (etc.) reach contacts who've otherwise opted out.
+        # The caller (admin endpoint) is responsible for writing the
+        # `transactional=true` audit tag.
+        if transactional:
+            suppressed: set[str] = set()
+        else:
+            suppressed = await self._load_suppressed_emails(
+                [str(r.get("email", "")) for r in raw_recipients if isinstance(r, dict)]
+            )
 
         # Per-recipient validation. We keep the input order so per_message_ids
         # is stable for clients correlating against the same batch.
@@ -268,7 +287,11 @@ class EmailDispatchTool(Tool):
     # ------------------------------------------------------------------
 
     @staticmethod
-    def _build_message(payload: dict[str, Any]) -> EmailMessage:
+    def _build_message(
+        payload: dict[str, Any],
+        *,
+        compliance_footer: dict[str, str] | None = None,
+    ) -> EmailMessage:
         subject = str(payload.get("subject", "")).strip()
         if not subject:
             raise DispatchValidationError("message.subject is required")
@@ -282,10 +305,17 @@ class EmailDispatchTool(Tool):
                 f"forbidden headers: {sorted(bad_headers)}"
             )
 
+        html_body = payload.get("html_body")
+        text_body = payload.get("text_body")
+
+        if compliance_footer:
+            html_body = _inject_footer_html(html_body, compliance_footer)
+            text_body = _inject_footer_text(text_body, compliance_footer)
+
         return EmailMessage(
             subject=subject,
-            html_body=payload.get("html_body"),
-            text_body=payload.get("text_body"),
+            html_body=html_body,
+            text_body=text_body,
             headers={str(k): str(v) for k, v in headers.items()},
             reply_to=payload.get("reply_to"),
         )
@@ -316,6 +346,53 @@ class EmailDispatchTool(Tool):
         if domain in _BLOCKED_RECIPIENT_DOMAINS:
             return "blocked_domain"
         return None
+
+
+def _inject_footer_text(body: str | None, footer: dict[str, str]) -> str | None:
+    """Append CAN-SPAM footer to text body if it's not already present.
+
+    Detection is naive on purpose — if the body already contains the
+    unsubscribe URL OR the postal address, we treat it as compliant and
+    don't double-append. Better a false positive than two visible footers."""
+    if body is None:
+        return None
+    unsub = str(footer.get("unsubscribe_url") or "").strip()
+    addr = str(footer.get("postal_address") or "").strip()
+    if not unsub and not addr:
+        return body
+    if (unsub and unsub in body) or (addr and addr in body):
+        return body
+    pieces = []
+    if unsub:
+        pieces.append(f"Unsubscribe: {unsub}")
+    if addr:
+        pieces.append(addr)
+    return body + "\n\n---\n" + "\n".join(pieces)
+
+
+def _inject_footer_html(body: str | None, footer: dict[str, str]) -> str | None:
+    if body is None:
+        return None
+    unsub = str(footer.get("unsubscribe_url") or "").strip()
+    addr = str(footer.get("postal_address") or "").strip()
+    if not unsub and not addr:
+        return body
+    if (unsub and unsub in body) or (addr and addr in body):
+        return body
+    parts = []
+    if unsub:
+        parts.append(
+            f'<a href="{unsub}">Unsubscribe</a>'
+        )
+    if addr:
+        # Newlines in postal address → <br> so the rendered footer reads.
+        parts.append(addr.replace("\n", "<br>"))
+    return body + (
+        '<hr style="margin-top:24px;border:none;border-top:1px solid #ddd"/>'
+        '<p style="font-size:12px;color:#666;margin-top:12px">'
+        + " · ".join(parts)
+        + "</p>"
+    )
 
 
 __all__ = ["DispatchValidationError", "EmailDispatchTool"]

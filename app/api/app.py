@@ -42,6 +42,7 @@ def create_app() -> FastAPI:
     application.include_router(brand_voice.router)
     application.include_router(strategy.campaigns_router)
     application.include_router(strategy.proposals_router)
+    application.include_router(strategy.touchpoints_router)
     application.include_router(tenant_constraints.router)
     init_observability(app=application)
     return application

@@ -56,3 +56,35 @@ class StrategyOverridePatch(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     channel_overrides: list[ChannelOverridePatch] = Field(min_length=1)
+
+
+class TouchpointOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: UUID
+    proposal_id: UUID
+    channel_platform: str
+    audience_id: UUID
+    scheduled_at: datetime
+    position: int
+    human_override: bool
+    frequency_warning: dict[str, Any] | None
+    created_at: datetime
+    updated_at: datetime
+
+
+class CalendarResponse(BaseModel):
+    proposal_id: UUID
+    items: list[TouchpointOut]
+    total: int
+
+
+class TouchpointPatch(BaseModel):
+    """Body for `PATCH /api/strategy-touchpoints/{id}` — drag a touch to a new
+    date (E05-S03 #3). `human_override` defaults true because a hand-edit by
+    definition is an override; clients can pass false to clear the flag."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    scheduled_at: datetime
+    human_override: bool = True

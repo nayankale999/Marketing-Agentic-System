@@ -547,3 +547,42 @@ class StrategyProposal(Base):
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+
+class StrategyTouchpoint(Base):
+    """A scheduled touch on the campaign calendar (W21, E05-S03).
+
+    Owned by the parent `strategy_proposal`. `frequency_warning` is populated
+    by the generator when a touchpoint sits inside a >cap rolling window for
+    its audience — it's a soft signal, not a block."""
+
+    __tablename__ = "strategy_touchpoint"
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, server_default=func.gen_random_uuid()
+    )
+    tenant_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("tenant.id", ondelete="CASCADE"), nullable=False
+    )
+    proposal_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("strategy_proposal.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    channel_platform: Mapped[str] = mapped_column(String(40), nullable=False)
+    audience_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("audience.id", ondelete="CASCADE"), nullable=False
+    )
+    scheduled_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    position: Mapped[int] = mapped_column(Integer, nullable=False, server_default="0")
+    human_override: Mapped[bool] = mapped_column(nullable=False, server_default="false")
+    frequency_warning: Mapped[dict[str, Any] | None] = mapped_column(JSONB)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )

@@ -20,22 +20,29 @@ from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.agents._calendar import HardCapViolationError
 from app.agents.strategist import (
+    CalendarSeedError,
     StrategistPreconditionError,
     assert_preconditions,
     ensure_strategist_agent,
+    re_evaluate_warnings,
+    seed_calendar,
 )
 from app.api.deps import get_tenant_db, require_role
 from app.api.schemas.audience import EnqueueTaskResponse
 from app.api.schemas.strategy import (
+    CalendarResponse,
     StrategyOverridePatch,
     StrategyProposalListResponse,
     StrategyProposalOut,
+    TouchpointOut,
+    TouchpointPatch,
 )
 from app.audit.context import current_actor_id, current_actor_kind
 from app.audit.writer import column_snapshot, write_audit
 from app.db.enums import CampaignStatus, UserRole
-from app.db.models import AppUser, Campaign, StrategyProposal
+from app.db.models import AppUser, Campaign, StrategyProposal, StrategyTouchpoint
 from app.orchestrator.queue import enqueue_task
 from app.orchestrator.state_machine import (
     GuardFailedError,
@@ -46,6 +53,7 @@ from app.settings.config import get_settings
 
 campaigns_router = APIRouter(prefix="/api/campaigns", tags=["strategy"])
 proposals_router = APIRouter(prefix="/api/strategy-proposals", tags=["strategy"])
+touchpoints_router = APIRouter(prefix="/api/strategy-touchpoints", tags=["strategy"])
 
 
 @campaigns_router.post(
@@ -226,10 +234,15 @@ async def accept_strategy(
     _user: AppUser = Depends(require_role(UserRole.marketer)),
     db: AsyncSession = Depends(get_tenant_db),
 ) -> StrategyProposal:
-    """Mark this proposal as accepted and drive the campaign state machine
-    from `audience_built` to `strategy_set`. The partial unique index on
+    """Mark this proposal as accepted, seed the touchpoint calendar (W21,
+    E05-S03), and drive the campaign state machine from `audience_built` to
+    `strategy_set`. The partial unique index on
     `strategy_proposal(campaign_id) WHERE is_accepted` would otherwise reject
-    if a prior winner exists — we clear it in the same transaction."""
+    if a prior winner exists — we clear it in the same transaction.
+
+    If the calendar can't be generated under current hard caps (E05-S05 #2),
+    the whole accept is rolled back so the campaign doesn't half-transition.
+    """
     proposal = await db.get(StrategyProposal, proposal_id)
     if proposal is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, detail="proposal not found")
@@ -253,10 +266,38 @@ async def accept_strategy(
         )
         .values(is_accepted=False)
     )
+    # Drop the old calendar — touchpoints are per-proposal and a new accept
+    # supersedes any previously-seeded set.
+    await db.execute(
+        StrategyTouchpoint.__table__.delete().where(
+            StrategyTouchpoint.proposal_id.in_(
+                select(StrategyProposal.id).where(
+                    StrategyProposal.campaign_id == proposal.campaign_id,
+                    StrategyProposal.id != proposal.id,
+                )
+            )
+        )
+    )
 
     before = column_snapshot(proposal)
     proposal.is_accepted = True
     await db.flush()
+
+    try:
+        await seed_calendar(db, proposal=proposal)
+    except CalendarSeedError as exc:
+        raise HTTPException(
+            status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc)
+        ) from exc
+    except HardCapViolationError as exc:
+        raise HTTPException(
+            status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail={
+                "message": "hard cap violation",
+                "violations": exc.violations,
+            },
+        ) from exc
+
     after = column_snapshot(proposal)
 
     write_audit(
@@ -284,3 +325,137 @@ async def accept_strategy(
             raise HTTPException(status.HTTP_409_CONFLICT, detail=str(exc)) from exc
 
     return proposal
+
+
+@campaigns_router.get(
+    "/{campaign_id}/strategy/calendar",
+    response_model=CalendarResponse,
+)
+async def get_campaign_calendar(
+    campaign_id: UUID,
+    _user: AppUser = Depends(require_role(UserRole.viewer)),
+    db: AsyncSession = Depends(get_tenant_db),
+) -> CalendarResponse:
+    """E05-S03 #1: every planned send/post across channels, sorted by time."""
+    accepted = (
+        await db.execute(
+            select(StrategyProposal)
+            .where(
+                StrategyProposal.campaign_id == campaign_id,
+                StrategyProposal.is_accepted.is_(True),
+            )
+        )
+    ).scalar_one_or_none()
+    if accepted is None:
+        raise HTTPException(
+            status.HTTP_404_NOT_FOUND,
+            detail="no accepted strategy proposal for this campaign",
+        )
+
+    rows = (
+        await db.execute(
+            select(StrategyTouchpoint)
+            .where(StrategyTouchpoint.proposal_id == accepted.id)
+            .order_by(
+                StrategyTouchpoint.scheduled_at.asc(),
+                StrategyTouchpoint.position.asc(),
+            )
+        )
+    ).scalars().all()
+    return CalendarResponse(
+        proposal_id=accepted.id,
+        items=[TouchpointOut.model_validate(r) for r in rows],
+        total=len(rows),
+    )
+
+
+@touchpoints_router.patch("/{touchpoint_id}", response_model=TouchpointOut)
+async def patch_touchpoint(
+    touchpoint_id: UUID,
+    body: TouchpointPatch,
+    _user: AppUser = Depends(require_role(UserRole.marketer)),
+    db: AsyncSession = Depends(get_tenant_db),
+) -> StrategyTouchpoint:
+    """E05-S03 #3 + E05-S05 #2: drag a touchpoint to a new date. Rejects 422
+    if the move would violate a tenant hard cap; re-evaluates frequency
+    warnings for the rest of the proposal's calendar; bumps the parent
+    proposal's `updated_at` per the W21 Option B trade-off (in-place edit
+    rather than full proposal clone)."""
+    from datetime import UTC as _UTC
+    from datetime import datetime as _dt
+
+    from app.agents._calendar import (
+        PlannedTouchpoint,
+        enforce_hard_caps,
+    )
+    from app.db.enums import TenantConstraintKind
+    from app.db.models import TenantConstraint
+
+    touchpoint = await db.get(StrategyTouchpoint, touchpoint_id)
+    if touchpoint is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, detail="touchpoint not found")
+
+    proposal = await db.get(StrategyProposal, touchpoint.proposal_id)
+    if proposal is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, detail="parent proposal missing")
+
+    before = column_snapshot(touchpoint)
+    touchpoint.scheduled_at = body.scheduled_at
+    touchpoint.human_override = body.human_override
+
+    # Re-validate hard caps against the candidate full set (post-move).
+    siblings = (
+        await db.execute(
+            select(StrategyTouchpoint).where(
+                StrategyTouchpoint.proposal_id == touchpoint.proposal_id
+            )
+        )
+    ).scalars().all()
+    planned = [
+        PlannedTouchpoint(
+            channel_platform=row.channel_platform,
+            audience_id=row.audience_id,
+            scheduled_at=row.scheduled_at,
+            position=row.position,
+            human_override=row.human_override,
+        )
+        for row in siblings
+    ]
+    constraints = (
+        await db.execute(
+            select(TenantConstraint).where(
+                TenantConstraint.tenant_id == proposal.tenant_id
+            )
+        )
+    ).scalars().all()
+    hard_caps = [
+        dict(c.payload)
+        for c in constraints
+        if c.kind == TenantConstraintKind.hard_cap.value
+    ]
+    try:
+        enforce_hard_caps(planned, hard_caps)
+    except HardCapViolationError as exc:
+        raise HTTPException(
+            status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail={"message": "hard cap violation", "violations": exc.violations},
+        ) from exc
+
+    await re_evaluate_warnings(db, proposal_id=touchpoint.proposal_id)
+    proposal.updated_at = _dt.now(_UTC)
+    await db.flush()
+    after = column_snapshot(touchpoint)
+
+    write_audit(
+        db,
+        tenant_id=touchpoint.tenant_id,
+        actor_kind=current_actor_kind.get(),
+        actor_id=current_actor_id.get(),
+        entity_kind="strategy_touchpoint",
+        entity_id=touchpoint.id,
+        action="moved",
+        before_state=before,
+        after_state=after,
+        metadata={"proposal_id": str(touchpoint.proposal_id)},
+    )
+    return touchpoint

@@ -18,6 +18,13 @@ from uuid import UUID
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.agents._calendar import (
+    HardCapViolationError,
+    PlannedTouchpoint,
+    detect_frequency_warnings,
+    enforce_hard_caps,
+    generate_calendar,
+)
 from app.agents._strategist_planner import (
     ChannelInfo,
     HumanOverride,
@@ -31,6 +38,7 @@ from app.db.models import (
     Campaign,
     Channel,
     StrategyProposal,
+    StrategyTouchpoint,
     TenantConstraint,
 )
 
@@ -38,6 +46,11 @@ from app.db.models import (
 class StrategistPreconditionError(Exception):
     """Raised when the campaign isn't ready for a strategy proposal — surfaced
     at submit time, before the worker is involved (AC E05-S01 #4)."""
+
+
+class CalendarSeedError(Exception):
+    """Raised when the calendar cannot be generated for an accepted proposal
+    (no audience, or hard caps make the requested touch count infeasible)."""
 
 
 async def ensure_strategist_agent(session: AsyncSession, tenant_id: UUID) -> Agent:
@@ -212,6 +225,125 @@ def _summarise_audience(audience: Audience | None) -> str:
     if audience is None:
         return "no audience materialised"
     return f"audience '{audience.name}' (criteria: {audience.segment_criteria})"
+
+
+async def seed_calendar(
+    session: AsyncSession, *, proposal: StrategyProposal
+) -> list[StrategyTouchpoint]:
+    """Generate + persist touchpoints for an accepted proposal (W21, E05-S03).
+
+    Called from the accept endpoint inside the same transaction so the
+    `accepted` flag and the calendar appear atomically. Raises
+    `CalendarSeedError` (precondition) or surfaces `HardCapViolationError`
+    (cap infeasible) so the caller can return a clean 422 and roll back.
+    """
+    campaign = await session.get(Campaign, proposal.campaign_id)
+    if campaign is None:
+        raise CalendarSeedError(f"campaign {proposal.campaign_id} not found")
+
+    audience = (
+        await session.execute(
+            select(Audience)
+            .where(Audience.campaign_id == campaign.id)
+            .order_by(Audience.created_at.desc())
+            .limit(1)
+        )
+    ).scalar_one_or_none()
+    if audience is None:
+        raise CalendarSeedError("no audience materialised for this campaign")
+
+    constraints = (
+        await session.execute(
+            select(TenantConstraint).where(TenantConstraint.tenant_id == campaign.tenant_id)
+        )
+    ).scalars().all()
+    hard_caps = [
+        dict(c.payload) for c in constraints if c.kind == TenantConstraintKind.hard_cap.value
+    ]
+
+    planned = generate_calendar(
+        proposal_payload=proposal.payload,
+        start_date=campaign.start_date,
+        end_date=campaign.end_date,
+        audience_id=audience.id,
+        hard_caps=hard_caps,
+    )
+    detect_frequency_warnings(planned)
+
+    persisted: list[StrategyTouchpoint] = []
+    for tp in planned:
+        row = StrategyTouchpoint(
+            tenant_id=campaign.tenant_id,
+            proposal_id=proposal.id,
+            channel_platform=tp.channel_platform,
+            audience_id=tp.audience_id,
+            scheduled_at=tp.scheduled_at,
+            position=tp.position,
+            human_override=tp.human_override,
+            frequency_warning=tp.frequency_warning,
+        )
+        session.add(row)
+        persisted.append(row)
+    if persisted:
+        await session.flush()
+    return persisted
+
+
+async def get_accepted_calendar(
+    session: AsyncSession, *, campaign_id: UUID
+) -> list[StrategyTouchpoint]:
+    """Downstream agents (Content Creator, Distribution) read here, not from
+    a re-derived schedule — AC E05-S03 #4."""
+    accepted = (
+        await session.execute(
+            select(StrategyProposal.id).where(
+                StrategyProposal.campaign_id == campaign_id,
+                StrategyProposal.is_accepted.is_(True),
+            )
+        )
+    ).scalar_one_or_none()
+    if accepted is None:
+        return []
+    return (
+        await session.execute(
+            select(StrategyTouchpoint)
+            .where(StrategyTouchpoint.proposal_id == accepted)
+            .order_by(StrategyTouchpoint.scheduled_at.asc(), StrategyTouchpoint.position.asc())
+        )
+    ).scalars().all()
+
+
+async def re_evaluate_warnings(
+    session: AsyncSession, *, proposal_id: UUID
+) -> None:
+    """Recompute `frequency_warning` for every touchpoint of a proposal.
+
+    Called after a drag (PATCH on a single touchpoint) because moving one
+    touch can shift other touchpoints' warning state in or out. In-place,
+    no return value."""
+    rows = (
+        await session.execute(
+            select(StrategyTouchpoint)
+            .where(StrategyTouchpoint.proposal_id == proposal_id)
+            .order_by(StrategyTouchpoint.scheduled_at.asc())
+        )
+    ).scalars().all()
+
+    planned = [
+        PlannedTouchpoint(
+            channel_platform=r.channel_platform,
+            audience_id=r.audience_id,
+            scheduled_at=r.scheduled_at,
+            position=r.position,
+            human_override=r.human_override,
+        )
+        for r in rows
+    ]
+    detect_frequency_warnings(planned)
+    for row, fresh in zip(rows, planned, strict=True):
+        row.frequency_warning = fresh.frequency_warning
+    if rows:
+        await session.flush()
 
 
 async def _carry_overrides(

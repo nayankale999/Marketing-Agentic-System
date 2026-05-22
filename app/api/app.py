@@ -10,6 +10,7 @@ from app.api import (
     auth,
     brand_voice,
     campaigns,
+    content_assets,
     health,
     ingest,
     integrations,
@@ -43,6 +44,8 @@ def create_app() -> FastAPI:
     application.include_router(strategy.campaigns_router)
     application.include_router(strategy.proposals_router)
     application.include_router(strategy.touchpoints_router)
+    application.include_router(content_assets.campaigns_router)
+    application.include_router(content_assets.assets_router)
     application.include_router(tenant_constraints.router)
     init_observability(app=application)
     return application

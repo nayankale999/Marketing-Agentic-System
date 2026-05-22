@@ -33,6 +33,8 @@ from app.db.base import Base
 from app.db.enums import (
     AgentKind,
     AgentStatus,
+    AssetStatus,
+    AssetType,
     CampaignStatus,
     CampaignType,
     ChannelPlatform,
@@ -88,6 +90,18 @@ _CHANNEL_PLATFORM = PgEnum(
 _EVENT_KIND = PgEnum(
     EventKind,
     name="event_kind",
+    create_type=False,
+    values_callable=lambda e: [m.value for m in e],
+)
+_ASSET_TYPE = PgEnum(
+    AssetType,
+    name="asset_type",
+    create_type=False,
+    values_callable=lambda e: [m.value for m in e],
+)
+_ASSET_STATUS = PgEnum(
+    AssetStatus,
+    name="asset_status",
     create_type=False,
     values_callable=lambda e: [m.value for m in e],
 )
@@ -580,6 +594,50 @@ class StrategyTouchpoint(Base):
     position: Mapped[int] = mapped_column(Integer, nullable=False, server_default="0")
     human_override: Mapped[bool] = mapped_column(nullable=False, server_default="false")
     frequency_warning: Mapped[dict[str, Any] | None] = mapped_column(JSONB)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+
+class ContentAsset(Base):
+    """Drafted (or in-flight) content piece for a campaign (W22, E06-S01).
+
+    Pre-created in `requested` when the orchestrator enqueues a generation
+    task; the Content Creator flips it to `drafted` once the copywriting
+    tool returns and brand/SEO checks land in `metadata`. The `content`
+    column holds the rendered body for MVP — object-store URIs land later
+    in `metadata.storage_uri`."""
+
+    __tablename__ = "content_asset"
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, server_default=func.gen_random_uuid()
+    )
+    tenant_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("tenant.id", ondelete="CASCADE"), nullable=False
+    )
+    campaign_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("campaign.id", ondelete="CASCADE"), nullable=False
+    )
+    channel_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("channel.id", ondelete="SET NULL")
+    )
+    asset_type: Mapped[AssetType] = mapped_column(_ASSET_TYPE, nullable=False)
+    status: Mapped[AssetStatus] = mapped_column(
+        _ASSET_STATUS, nullable=False, server_default="requested"
+    )
+    title: Mapped[str | None] = mapped_column(String(300))
+    content: Mapped[str | None] = mapped_column(Text)
+    # `metadata` is reserved on DeclarativeBase; map the attribute name to the column.
+    extra_metadata: Mapped[dict[str, Any]] = mapped_column(
+        "metadata", JSONB, nullable=False, server_default="{}"
+    )
+    is_required: Mapped[bool] = mapped_column(nullable=False, server_default="true")
+    scheduled_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    published_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )

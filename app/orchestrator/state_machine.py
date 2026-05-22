@@ -18,8 +18,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.audit.context import current_actor_id, current_actor_kind
 from app.audit.writer import write_audit
-from app.db.enums import AgentKind, CampaignStatus
-from app.db.models import Agent, Campaign, StrategyProposal
+from app.db.enums import AgentKind, AssetStatus, CampaignStatus
+from app.db.models import Agent, Campaign, ContentAsset, StrategyProposal
 from app.orchestrator.queue import enqueue_task
 
 Guard = Callable[[AsyncSession, Campaign], Awaitable[bool]]
@@ -189,5 +189,72 @@ campaign_sm.register(
         from_state=CampaignStatus.audience_built,
         to_state=CampaignStatus.strategy_set,
         guard=_has_accepted_strategy,
+    )
+)
+
+
+async def _seed_content_assets(session: AsyncSession, campaign: Campaign) -> None:
+    """on_enter for `start_content`: build the content_asset rows + enqueue
+    one generation task per row. Lives here (rather than in the route) so
+    the same effect fires whether the transition was triggered by the API
+    or by the orchestrator (e.g. an auto-advance later)."""
+    # Imported here to avoid a top-level circular: content_creator imports the
+    # state machine in its post-draft hook.
+    from app.agents.content_creator import seed_assets_for_campaign
+
+    await seed_assets_for_campaign(session, campaign=campaign)
+
+
+campaign_sm.register(
+    Transition(
+        name="start_content",
+        from_state=CampaignStatus.strategy_set,
+        to_state=CampaignStatus.content_in_production,
+        on_enter=_seed_content_assets,
+    )
+)
+
+
+async def _all_required_assets_drafted(
+    session: AsyncSession, campaign: Campaign
+) -> bool:
+    """Guard for `submit_for_approval`: no required content_asset is still in
+    a pre-drafted or failed state. Empty asset set blocks — you can't move to
+    approval without any content."""
+    total_required = (
+        await session.execute(
+            select(ContentAsset.id).where(
+                ContentAsset.campaign_id == campaign.id,
+                ContentAsset.is_required.is_(True),
+            )
+        )
+    ).first()
+    if total_required is None:
+        return False
+
+    blocking = (
+        await session.execute(
+            select(ContentAsset.id).where(
+                ContentAsset.campaign_id == campaign.id,
+                ContentAsset.is_required.is_(True),
+                ContentAsset.status.in_(
+                    [
+                        AssetStatus.requested,
+                        AssetStatus.generating,
+                        AssetStatus.failed,
+                    ]
+                ),
+            )
+        )
+    ).first()
+    return blocking is None
+
+
+campaign_sm.register(
+    Transition(
+        name="submit_for_approval",
+        from_state=CampaignStatus.content_in_production,
+        to_state=CampaignStatus.approval_pending,
+        guard=_all_required_assets_drafted,
     )
 )

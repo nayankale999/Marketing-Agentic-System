@@ -37,6 +37,15 @@ _DEFAULT_LENGTH_CONSTRAINTS: dict[str, dict[str, int]] = {
     "x": {"body": 280},
     "twitter": {"body": 280},
     "ad_creative": {"headline": 40, "body": 90, "cta": 30, "primary_text": 125},
+    # Generic short-form social post — used when the Content Creator (W22)
+    # doesn't know which exact social platform applies.
+    "social_post": {"body": 600, "cta": 40},
+    "sms": {"body": 160},
+    # Long-form: blog and landing page copy. Body budgets are generous —
+    # callers can tighten via `length_constraints`. The SEO tool (W18) is
+    # the quality gate for these, not raw character count.
+    "blog_post": {"title": 70, "meta_description": 160, "body": 6000, "cta": 60},
+    "landing_page_copy": {"headline": 90, "body": 2000, "cta": 60},
 }
 
 # Fields that MUST be present in the model output for each channel. The model
@@ -47,6 +56,10 @@ _REQUIRED_FIELDS: dict[str, tuple[str, ...]] = {
     "x": ("body",),
     "twitter": ("body",),
     "ad_creative": ("headline", "body", "primary_text"),
+    "social_post": ("body",),
+    "sms": ("body",),
+    "blog_post": ("title", "meta_description", "body"),
+    "landing_page_copy": ("headline", "body", "cta"),
 }
 
 _MAX_RETRIES = 2

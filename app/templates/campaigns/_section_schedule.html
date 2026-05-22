@@ -1,0 +1,34 @@
+{% from "_macros.html" import empty_state %}
+{% if touchpoints %}
+  <table>
+    <thead>
+      <tr>
+        <th>When</th>
+        <th>Channel</th>
+        <th>Audience</th>
+        <th>Position</th>
+        <th>Flag</th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for tp in touchpoints %}
+        <tr>
+          <td class="small mono">{{ tp.scheduled_at }}</td>
+          <td>{{ tp.channel_platform }}</td>
+          <td class="small muted">{{ tp.audience_id }}</td>
+          <td>{{ tp.position }}</td>
+          <td>
+            {% if tp.frequency_warning %}
+              <span class="badge badge--warn" title="{{ tp.frequency_warning }}">freq cap</span>
+            {% endif %}
+            {% if tp.human_override %}
+              <span class="badge badge--info">human override</span>
+            {% endif %}
+          </td>
+        </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+{% else %}
+  {{ empty_state("No touchpoints scheduled yet.") }}
+{% endif %}

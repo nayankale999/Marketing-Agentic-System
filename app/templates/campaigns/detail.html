@@ -1,0 +1,53 @@
+{% extends "base.html" %}
+{% from "_macros.html" import status_badge, section_heading, empty_state %}
+
+{% block title %}{{ campaign.name }} — MAS{% endblock %}
+
+{% block content %}
+  <header class="stack">
+    <div class="cluster">
+      <h1>{{ campaign.name }}</h1>
+      {{ status_badge(campaign.status.value) }}
+    </div>
+    <div class="muted small">
+      Type {{ campaign.campaign_type.value }} ·
+      Owner {{ owner_label or "—" }} ·
+      Dates {{ campaign.start_date }} → {{ campaign.end_date }}
+    </div>
+  </header>
+
+  <section class="card">
+    {{ section_heading("Brief", "brief") }}
+    {% include "campaigns/_section_brief.html" %}
+  </section>
+
+  <section class="card">
+    {{ section_heading("Audience", "audience") }}
+    {% include "campaigns/_section_audience.html" %}
+  </section>
+
+  <section class="card">
+    {{ section_heading("Strategy", "strategy") }}
+    {% include "campaigns/_section_strategy.html" %}
+  </section>
+
+  <section class="card">
+    {{ section_heading("Content", "content") }}
+    {% include "campaigns/_section_content.html" %}
+  </section>
+
+  <section class="card">
+    {{ section_heading("Schedule", "schedule") }}
+    {% include "campaigns/_section_schedule.html" %}
+  </section>
+
+  <section class="card">
+    {{ section_heading("Runs", "runs") }}
+    {{ empty_state("Run history lands with W34 (analytics warehouse).") }}
+  </section>
+
+  <section class="card">
+    {{ section_heading("Reports", "reports") }}
+    {{ empty_state("End-of-campaign reports land with W38.") }}
+  </section>
+{% endblock %}

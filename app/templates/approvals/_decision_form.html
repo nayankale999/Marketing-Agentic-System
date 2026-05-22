@@ -1,0 +1,54 @@
+{# Decision footer — three actions. Each form posts to the existing API
+   endpoints; on success, the HTML returned by the UI router swaps this
+   whole block out with a confirmation card. #}
+
+{% if asset.status.value in ("pending_approval", "rejected") %}
+  <div class="stack">
+    {# Approve straight #}
+    <form method="post" action="/ui/approvals/{{ asset.id }}/approve" hx-post="/ui/approvals/{{ asset.id }}/approve" hx-target="#decision" hx-swap="outerHTML">
+      <button class="btn btn--success" type="submit">Approve</button>
+    </form>
+
+    {# Approve with edits #}
+    <form method="post" action="/ui/approvals/{{ asset.id }}/approve" hx-post="/ui/approvals/{{ asset.id }}/approve" hx-target="#decision" hx-swap="outerHTML" class="stack">
+      <h3>Approve with edits</h3>
+      <div class="field">
+        <label class="field__label" for="edit-subject">Subject</label>
+        <input class="input" type="text" id="edit-subject" name="edit_field_subject" value="{{ (asset.extra_metadata.get('fields') or {}).get('subject', '') }}">
+      </div>
+      <div class="field">
+        <label class="field__label" for="edit-body">Body</label>
+        <textarea class="textarea" id="edit-body" name="edited_content">{{ asset.content or "" }}</textarea>
+        <p class="field__help">Leave unchanged to approve as-is; otherwise this replaces the asset content.</p>
+      </div>
+      <div class="field">
+        <label class="field__label" for="edit-note">Note (optional)</label>
+        <input class="input" type="text" id="edit-note" name="note" placeholder="What did you change and why?">
+      </div>
+      <button class="btn btn--primary" type="submit">Approve with edits</button>
+    </form>
+
+    {# Reject #}
+    <form method="post" action="/ui/approvals/{{ asset.id }}/reject" hx-post="/ui/approvals/{{ asset.id }}/reject" hx-target="#decision" hx-swap="outerHTML" class="stack">
+      <h3>Reject</h3>
+      <div class="field">
+        <label class="field__label" for="reject-category">Category</label>
+        <select class="select" id="reject-category" name="category" required>
+          <option value="off_voice">Off voice</option>
+          <option value="inaccurate">Inaccurate</option>
+          <option value="wrong_audience">Wrong audience</option>
+          <option value="length">Length</option>
+          <option value="compliance">Compliance</option>
+          <option value="other">Other</option>
+        </select>
+      </div>
+      <div class="field">
+        <label class="field__label" for="reject-reason">Reason (required)</label>
+        <textarea class="textarea" id="reject-reason" name="reason" required></textarea>
+      </div>
+      <button class="btn btn--danger" type="submit">Reject</button>
+    </form>
+  </div>
+{% else %}
+  <p class="muted">Asset is in <code>{{ asset.status.value }}</code> — no further decision available.</p>
+{% endif %}

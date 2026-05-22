@@ -1,0 +1,43 @@
+{% extends "base.html" %}
+{% from "_macros.html" import status_badge, empty_state %}
+
+{% block title %}Approval queue — MAS{% endblock %}
+
+{% block content %}
+  <header class="stack">
+    <h1>Approval queue</h1>
+    <p class="muted">{{ items | length }} asset{{ "" if items | length == 1 else "s" }} awaiting review.</p>
+  </header>
+
+  {% if items %}
+    <table>
+      <thead>
+        <tr>
+          <th>Asset</th>
+          <th>Campaign</th>
+          <th>Channel</th>
+          <th>Type</th>
+          <th>Submitted</th>
+          <th>Flags</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for item in items %}
+          <tr>
+            <td><a href="/ui/approvals/{{ item.asset_id }}">{{ item.title or "(untitled)" }}</a></td>
+            <td>{{ item.campaign_name }}</td>
+            <td>{{ item.channel_platform or "—" }}</td>
+            <td>{{ item.asset_type }}</td>
+            <td class="small muted">{{ item.submitted_at }}</td>
+            <td>
+              {% if item.overdue %}<span class="badge badge--overdue">overdue</span>{% endif %}
+              {% if item.compliance_blocked %}<span class="badge badge--danger">compliance</span>{% endif %}
+            </td>
+          </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  {% else %}
+    {{ empty_state("Queue is empty.") }}
+  {% endif %}
+{% endblock %}

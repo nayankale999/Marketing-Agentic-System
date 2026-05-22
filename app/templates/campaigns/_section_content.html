@@ -1,0 +1,33 @@
+{% from "_macros.html" import status_badge, empty_state %}
+{% if content_assets %}
+  <table>
+    <thead>
+      <tr>
+        <th>Title</th>
+        <th>Type</th>
+        <th>Channel</th>
+        <th>Status</th>
+        <th>Scheduled</th>
+        <th></th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for asset in content_assets %}
+        <tr>
+          <td>{{ asset.title or "(no title)" }}</td>
+          <td>{{ asset.asset_type.value }}</td>
+          <td>{{ (asset.extra_metadata or {}).get("channel_platform", "—") }}</td>
+          <td>{{ status_badge(asset.status.value) }}</td>
+          <td class="small muted">{{ asset.scheduled_at or "—" }}</td>
+          <td class="right">
+            {% if asset.status.value == "pending_approval" %}
+              <a class="btn btn--ghost" href="/ui/approvals/{{ asset.id }}">Review</a>
+            {% endif %}
+          </td>
+        </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+{% else %}
+  {{ empty_state("No content drafted yet.") }}
+{% endif %}

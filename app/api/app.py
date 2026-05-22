@@ -1,6 +1,9 @@
 """FastAPI application factory."""
 
+from pathlib import Path
+
 from fastapi import FastAPI
+from fastapi.staticfiles import StaticFiles
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.middleware.sessions import SessionMiddleware
 
@@ -30,6 +33,8 @@ from app.api import (
     tenant_constraints,
     unsubscribe,
 )
+from app.api.ui import approvals as ui_approvals
+from app.api.ui import campaigns as ui_campaigns
 from app.audit import register_listeners
 from app.observability import init_observability, tag_span_with_actor
 from app.settings.config import get_settings
@@ -73,6 +78,14 @@ def create_app() -> FastAPI:
     application.include_router(unsubscribe.router)
     application.include_router(provider_rate_limits.router)
     application.include_router(tenant_constraints.router)
+    application.include_router(ui_campaigns.router)
+    application.include_router(ui_approvals.router)
+
+    # Static assets for the UI (W32). Mounted last so a misconfigured
+    # static path doesn't shadow any of the API routers above.
+    static_dir = Path(__file__).resolve().parent.parent / "static"
+    application.mount("/static", StaticFiles(directory=str(static_dir)), name="static")
+
     init_observability(app=application)
     return application
 

@@ -1,0 +1,27 @@
+{% from "_macros.html" import empty_state %}
+<div class="grid-2">
+  <div class="stack">
+    <div class="card__row"><span class="card__label">Objective</span><span>{{ campaign.objective }}</span></div>
+    <div class="card__row"><span class="card__label">Budget</span><span>{{ campaign.budget_total }} {{ campaign.currency }}</span></div>
+    <div class="card__row"><span class="card__label">Created</span><span class="small muted">{{ campaign.created_at }}</span></div>
+    <div class="card__row"><span class="card__label">Updated</span><span class="small muted">{{ campaign.updated_at }}</span></div>
+  </div>
+  <div class="stack">
+    <h3>Brief</h3>
+    {% if campaign.brief %}
+      <p>{{ campaign.brief }}</p>
+    {% else %}
+      {{ empty_state("No brief set.") }}
+    {% endif %}
+    <h3>KPI targets</h3>
+    {% if campaign.kpi_targets %}
+      <ul>
+        {% for key, value in campaign.kpi_targets.items() %}
+          <li><strong>{{ key }}</strong>: {{ value }}</li>
+        {% endfor %}
+      </ul>
+    {% else %}
+      {{ empty_state("No KPI targets recorded.") }}
+    {% endif %}
+  </div>
+</div>

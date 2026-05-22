@@ -1,0 +1,123 @@
+{% extends "base.html" %}
+{% from "_macros.html" import status_badge, channel_preview, section_heading, empty_state %}
+
+{% block title %}Review: {{ asset.title or "asset" }} — MAS{% endblock %}
+
+{% block content %}
+  <header class="stack">
+    <div class="cluster">
+      <h1>{{ asset.title or "(untitled asset)" }}</h1>
+      {{ status_badge(asset.status.value) }}
+      {% if asset.extra_metadata.get("compliance", {}).get("blocked") %}
+        <span class="badge badge--danger">compliance blocked</span>
+      {% endif %}
+    </div>
+    <div class="muted small">
+      Campaign <a href="/ui/campaigns/{{ campaign.id }}">{{ campaign.name }}</a> ·
+      Type {{ asset.asset_type.value }} ·
+      Channel {{ channel_kind or "—" }} ·
+      Submitted {{ asset.updated_at }}
+    </div>
+  </header>
+
+  {% set compliance = asset.extra_metadata.get("compliance") or {} %}
+  {% if compliance.get("blocked") %}
+    <div class="banner banner--danger">
+      This asset has a critical compliance flag. Clear it via <code>POST /api/content-assets/{{ asset.id }}/clear-compliance</code> before approving.
+    </div>
+  {% endif %}
+
+  <div class="grid-review">
+    {# Left: preview #}
+    <div class="stack">
+      {{ section_heading("Preview", "preview") }}
+      {{ channel_preview(channel_kind, asset.title, preview_fields) }}
+      {% if preview_unresolved %}
+        <p class="muted small">Unresolved merge fields: {{ preview_unresolved | join(", ") }}</p>
+      {% endif %}
+    </div>
+
+    {# Right: review context #}
+    <div class="stack">
+      <section class="card">
+        {{ section_heading("Brief", "brief") }}
+        <p><strong>Objective:</strong> {{ campaign.objective }}</p>
+        {% if campaign.brief %}<p>{{ campaign.brief }}</p>{% endif %}
+      </section>
+
+      <section class="card">
+        {{ section_heading("Audience", "audience") }}
+        {% if audience %}
+          <p>{{ audience.name }} — {{ audience.actual_size or audience.estimated_size or 0 }} members</p>
+        {% else %}
+          {{ empty_state("No audience materialised.") }}
+        {% endif %}
+      </section>
+
+      <section class="card">
+        {{ section_heading("Brand check", "brand") }}
+        {% set brand = asset.extra_metadata.get("brand_check") or {} %}
+        {% if brand %}
+          <p>
+            Result:
+            {% if brand.get("pass") %}<span class="badge badge--success">pass</span>{% else %}<span class="badge badge--warn">flagged</span>{% endif %}
+          </p>
+          {% if brand.get("failing_words") %}
+            <p class="muted small">Flagged words: {{ brand.failing_words | join(", ") }}</p>
+          {% endif %}
+        {% else %}
+          {{ empty_state("No brand check ran.") }}
+        {% endif %}
+      </section>
+
+      <section class="card">
+        {{ section_heading("Compliance", "compliance") }}
+        {% if compliance %}
+          <p>
+            {% if compliance.get("blocked") %}
+              <span class="badge badge--danger">blocked</span>
+            {% elif not compliance.get("pass") %}
+              <span class="badge badge--warn">warnings</span>
+            {% else %}
+              <span class="badge badge--success">clean</span>
+            {% endif %}
+          </p>
+          {% set hits = compliance.get("hits") or [] %}
+          {% if hits %}
+            <ul>
+              {% for hit in hits %}
+                <li><strong>{{ hit.rule }}</strong> ({{ hit.severity }}) — <span class="mono small">{{ hit.snippet }}</span></li>
+              {% endfor %}
+            </ul>
+          {% endif %}
+        {% else %}
+          {{ empty_state("No compliance check ran.") }}
+        {% endif %}
+      </section>
+
+      {% set seo = asset.extra_metadata.get("seo") %}
+      {% if seo %}
+        <section class="card">
+          {{ section_heading("SEO", "seo") }}
+          {% if seo.get("score") is not none %}
+            <p>Score: <strong>{{ seo.get("score") }}</strong> / 100</p>
+          {% elif seo.get("reason") %}
+            <p class="muted">{{ seo.get("reason") }}</p>
+          {% endif %}
+          {% if seo.get("recommendations") %}
+            <ul>
+              {% for rec in seo.recommendations %}
+                <li>{{ rec }}</li>
+              {% endfor %}
+            </ul>
+          {% endif %}
+        </section>
+      {% endif %}
+    </div>
+  </div>
+
+  <section class="card" id="decision">
+    {{ section_heading("Decision", "decision") }}
+    {% include "approvals/_decision_form.html" %}
+  </section>
+{% endblock %}

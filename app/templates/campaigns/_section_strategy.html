@@ -1,0 +1,50 @@
+{% from "_macros.html" import empty_state %}
+{% if proposal %}
+  <div class="stack">
+    <div class="muted small">
+      Version {{ proposal.version }} · {{ proposal.created_by_kind }} ·
+      Accepted: {{ "yes" if proposal.is_accepted else "no" }}
+    </div>
+
+    <h3>Channels</h3>
+    {% set channels = proposal.payload.get("channels") or [] %}
+    {% if channels %}
+      <table>
+        <thead>
+          <tr><th>Platform</th><th class="right">Allocation %</th><th class="right">Amount</th><th>Rationale</th></tr>
+        </thead>
+        <tbody>
+          {% for ch in channels %}
+            <tr>
+              <td>{{ ch.platform }}</td>
+              <td class="right">{{ ch.allocation_pct }}</td>
+              <td class="right">{{ ch.allocation_amount }}</td>
+              <td class="muted small">{{ ch.rationale }}</td>
+            </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    {% else %}
+      {{ empty_state("No channels proposed.") }}
+    {% endif %}
+
+    <h3>KPIs</h3>
+    {% set primary = proposal.payload.get("kpis", {}).get("primary") %}
+    {% if primary %}
+      <p>
+        <strong>Primary:</strong> {{ primary.metric }} target {{ primary.target }}
+        <span class="muted small">— {{ primary.rationale }}</span>
+      </p>
+    {% endif %}
+    {% set secondary = proposal.payload.get("kpis", {}).get("secondary") or [] %}
+    {% if secondary %}
+      <ul>
+        {% for kpi in secondary %}
+          <li><strong>{{ kpi.metric }}</strong> target {{ kpi.target }} <span class="muted small">— {{ kpi.rationale }}</span></li>
+        {% endfor %}
+      </ul>
+    {% endif %}
+  </div>
+{% else %}
+  {{ empty_state("No strategy proposal yet.") }}
+{% endif %}

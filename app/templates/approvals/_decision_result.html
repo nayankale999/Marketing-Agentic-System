@@ -1,0 +1,11 @@
+{# Confirmation card swapped into #decision after a decision form submits. #}
+<section class="card" id="decision">
+  <h2 class="section__heading">Decision recorded</h2>
+  <div class="banner banner--{{ result_kind }}">
+    {{ message }}
+  </div>
+  <p>
+    Decision id <code class="mono">{{ decision_id }}</code>.
+    <a class="btn btn--ghost" href="/ui/approvals/queue">Back to queue</a>
+  </p>
+</section>

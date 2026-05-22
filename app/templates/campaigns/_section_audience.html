@@ -1,0 +1,20 @@
+{% from "_macros.html" import empty_state %}
+{% if audience %}
+  <div class="grid-2">
+    <div class="stack">
+      <div class="card__row"><span class="card__label">Name</span><span>{{ audience.name }}</span></div>
+      <div class="card__row"><span class="card__label">Members</span><span>{{ audience.actual_size or audience.estimated_size or 0 }}</span></div>
+      <div class="card__row"><span class="card__label">Refreshed</span><span class="small muted">{{ audience.refreshed_at }}</span></div>
+    </div>
+    <div class="stack">
+      <h3>Criteria</h3>
+      {% if audience.segment_criteria %}
+        <pre class="mono">{{ audience.segment_criteria | tojson(indent=2) }}</pre>
+      {% else %}
+        {{ empty_state("No criteria recorded.") }}
+      {% endif %}
+    </div>
+  </div>
+{% else %}
+  {{ empty_state("No audience materialised yet.") }}
+{% endif %}

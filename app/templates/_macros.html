@@ -1,0 +1,62 @@
+{# Reusable presentation macros shared across the UI. Keep these small;
+   anything bigger lives in its own partial template. #}
+
+{% macro status_badge(status) -%}
+  <span class="badge badge--{{ status_badge_class(status) }}">{{ status }}</span>
+{%- endmacro %}
+
+{% macro section_heading(title, anchor) -%}
+  <h2 id="{{ anchor }}" class="section__heading">{{ title }}</h2>
+{%- endmacro %}
+
+{% macro empty_state(message) -%}
+  <p class="empty">{{ message }}</p>
+{%- endmacro %}
+
+{# Channel-aware preview frame. The body is already merge-resolved by the
+   W24 helper; this just wraps it in a chrome that signals "this is what
+   the email/LinkedIn/ad will look like" without aiming for pixel parity. #}
+{% macro channel_preview(channel_kind, title, rendered_fields) -%}
+  {% if channel_kind == "email" %}
+    <div class="preview preview--email">
+      <div class="preview__chrome">
+        <div class="preview__row"><span class="preview__label">From</span><span>{{ rendered_fields.get("from", "marketing@yourdomain.com") }}</span></div>
+        <div class="preview__row"><span class="preview__label">Subject</span><span>{{ rendered_fields.get("subject", title or "(no subject)") }}</span></div>
+        {% if rendered_fields.get("preheader") %}
+        <div class="preview__row"><span class="preview__label">Preheader</span><span>{{ rendered_fields.get("preheader") }}</span></div>
+        {% endif %}
+      </div>
+      <div class="preview__body">
+        {{ rendered_fields.get("body", "") | safe }}
+        {% if rendered_fields.get("cta") %}
+          <p><a class="btn btn--primary" href="#">{{ rendered_fields.get("cta") }}</a></p>
+        {% endif %}
+      </div>
+    </div>
+  {% elif channel_kind in ("linkedin", "x", "meta", "instagram", "social_post") %}
+    <div class="preview preview--social">
+      <div class="preview__chrome">
+        <div class="preview__avatar"></div>
+        <div>
+          <div class="preview__page">{{ rendered_fields.get("page_name", "Your Page") }}</div>
+          <div class="preview__meta">{{ channel_kind | capitalize }} · Sponsored</div>
+        </div>
+      </div>
+      <div class="preview__body">
+        {{ rendered_fields.get("body", "") | safe }}
+      </div>
+    </div>
+  {% elif channel_kind in ("google_ads", "meta_ads", "ad_creative") %}
+    <div class="preview preview--ad">
+      <div class="preview__headline">{{ rendered_fields.get("headline", title or "Headline") }}</div>
+      <div class="preview__body">{{ rendered_fields.get("body", "") }}</div>
+      <div class="preview__primary">{{ rendered_fields.get("primary_text", "") }}</div>
+      {% if rendered_fields.get("cta") %}<button class="btn btn--primary">{{ rendered_fields.get("cta") }}</button>{% endif %}
+    </div>
+  {% else %}
+    <div class="preview preview--plain">
+      {% if title %}<h3>{{ title }}</h3>{% endif %}
+      <div>{{ rendered_fields.get("body", "") | safe }}</div>
+    </div>
+  {% endif %}
+{%- endmacro %}

@@ -823,3 +823,40 @@ class TenantApprovalSettings(Base):
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )
+
+
+class SuppressionEntry(Base):
+    """CAN-SPAM / GDPR unsubscribe + bounce + complaint list (W27, E12-S02).
+
+    Table existed in 0001; the ORM model lands now that the email dispatch
+    tool needs to filter against it. The unique constraint on
+    `(tenant_id, channel_platform, identifier)` makes idempotent inserts
+    cheap via `ON CONFLICT DO NOTHING` from the webhook ingest path."""
+
+    __tablename__ = "suppression_entry"
+    __table_args__ = (
+        UniqueConstraint(
+            "tenant_id",
+            "channel_platform",
+            "identifier",
+            name="uq_suppression_entry_tenant_channel_identifier",
+        ),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, server_default=func.gen_random_uuid()
+    )
+    tenant_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("tenant.id", ondelete="CASCADE"), nullable=False
+    )
+    channel_platform: Mapped[ChannelPlatform] = mapped_column(
+        _CHANNEL_PLATFORM, nullable=False
+    )
+    identifier: Mapped[str] = mapped_column(CITEXT, nullable=False)
+    reason: Mapped[str] = mapped_column(String(50), nullable=False)
+    source_event_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("analytic_event.id", ondelete="SET NULL")
+    )
+    suppressed_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )

@@ -18,6 +18,7 @@ from app.api import (
     health,
     ingest,
     integrations,
+    integrations_email,
     me,
     preview,
     strategy,
@@ -58,6 +59,7 @@ def create_app() -> FastAPI:
     application.include_router(preview.public_router)
     application.include_router(approvals.router)
     application.include_router(approval_settings.router)
+    application.include_router(integrations_email.router)
     application.include_router(tenant_constraints.router)
     init_observability(app=application)
     return application

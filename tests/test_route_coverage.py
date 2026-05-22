@@ -18,6 +18,9 @@ ALLOWLIST: set[str] = {
     # Preview share-link consumer (W24, E06-S07 #4): the signed token IS the
     # credential, so the route intentionally bypasses require_role.
     "/api/preview-links/{token}",
+    # Email provider webhook (W27, E12-S02 #2): shared-secret auth via the
+    # X-MAS-Webhook-Secret header; no OIDC session.
+    "/api/integrations/email/webhook/{tenant_id}",
 }
 
 

@@ -29,6 +29,8 @@ from app.api.schemas.content_asset import (
     ContentAssetOut,
     StartContentResponse,
 )
+from app.audit.context import current_actor_id, current_actor_kind
+from app.audit.writer import column_snapshot, write_audit
 from app.db.enums import AssetStatus, CampaignStatus, UserRole
 from app.db.models import AppUser, Campaign, ContentAsset
 from app.orchestrator.queue import enqueue_task
@@ -185,5 +187,53 @@ async def regenerate_asset(
             "campaign_id": str(asset.campaign_id),
             "triggered_by_user_id": str(user.id),
         },
+    )
+    return asset
+
+
+@assets_router.post(
+    "/{asset_id}/clear-compliance",
+    response_model=ContentAssetOut,
+)
+async def clear_compliance_block(
+    asset_id: UUID,
+    user: AppUser = Depends(require_role(UserRole.manager)),
+    db: AsyncSession = Depends(get_tenant_db),
+) -> ContentAsset:
+    """E06-S08 #2: manager clears a critical compliance block so the campaign
+    can advance to approval. The original hits stay in metadata for the audit
+    trail; only the `blocked` flag flips."""
+    asset = await db.get(ContentAsset, asset_id)
+    if asset is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, detail="content asset not found")
+
+    compliance = asset.extra_metadata.get("compliance") if asset.extra_metadata else None
+    if not isinstance(compliance, dict) or not compliance.get("blocked"):
+        raise HTTPException(
+            status.HTTP_409_CONFLICT,
+            detail="asset has no active compliance block to clear",
+        )
+
+    before = column_snapshot(asset)
+    updated_compliance = {
+        **compliance,
+        "blocked": False,
+        "cleared_by_user_id": str(user.id),
+    }
+    asset.extra_metadata = {**asset.extra_metadata, "compliance": updated_compliance}
+    await db.flush()
+    after = column_snapshot(asset)
+
+    write_audit(
+        db,
+        tenant_id=asset.tenant_id,
+        actor_kind=current_actor_kind.get(),
+        actor_id=current_actor_id.get(),
+        entity_kind="content_asset",
+        entity_id=asset.id,
+        action="compliance_cleared",
+        before_state=before,
+        after_state=after,
+        metadata={"cleared_hit_count": len(compliance.get("hits", []))},
     )
     return asset

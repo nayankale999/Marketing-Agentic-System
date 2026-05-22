@@ -6,10 +6,12 @@ from starlette.middleware.sessions import SessionMiddleware
 
 from app.api import (
     _protected,
+    ab_tests,
     audiences,
     auth,
     brand_voice,
     campaigns,
+    compliance_rules,
     content_assets,
     health,
     ingest,
@@ -46,6 +48,9 @@ def create_app() -> FastAPI:
     application.include_router(strategy.touchpoints_router)
     application.include_router(content_assets.campaigns_router)
     application.include_router(content_assets.assets_router)
+    application.include_router(ab_tests.campaigns_router)
+    application.include_router(ab_tests.ab_tests_router)
+    application.include_router(compliance_rules.router)
     application.include_router(tenant_constraints.router)
     init_observability(app=application)
     return application

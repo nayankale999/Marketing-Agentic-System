@@ -29,6 +29,12 @@ from uuid import UUID
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.agents._compliance import (
+    ComplianceCheckError,
+    ComplianceResult,
+    body_cosine_similarity,
+    check_compliance,
+)
 from app.agents._content_planner import (
     AssetPlan,
     PlannerError,
@@ -37,19 +43,30 @@ from app.agents._content_planner import (
     extract_title,
     plan_for_platform,
 )
+from app.agents._variants import (
+    MAX_VARIANTS,
+    SIM_REGEN_MAX_RETRIES,
+    SIMILARITY_THRESHOLD,
+    AbTestSpec,
+    angle_for_index,
+    parse_ab_test_specs,
+)
 from app.agents.brand_voice import check_dont_words, format_brand_voice_prompt
 from app.db.enums import (
+    AbTestStatus,
     AgentKind,
     AssetStatus,
     AssetType,
     CampaignStatus,
 )
 from app.db.models import (
+    AbTest,
     Agent,
     Audience,
     BrandVoice,
     Campaign,
     Channel,
+    ComplianceRule,
     ContentAsset,
     StrategyProposal,
     StrategyTouchpoint,
@@ -131,7 +148,16 @@ async def seed_assets_for_campaign(
     ).scalars().all()
     channel_by_platform: dict[str, Channel] = {c.platform.value: c for c in channels}
 
+    # A/B specs from the accepted proposal — keyed by channel platform so we
+    # know how many variants to fan out per touchpoint. Missing entry means
+    # this channel gets the standard single-asset treatment.
+    ab_specs: dict[str, AbTestSpec] = {
+        spec.channel: spec for spec in parse_ab_test_specs(accepted.payload)
+    }
+
     rows: list[ContentAsset] = []
+    pending_ab_tests: list[tuple[AbTestSpec, list[ContentAsset]]] = []
+
     for tp in touchpoints:
         try:
             plan = plan_for_platform(tp.channel_platform)
@@ -141,21 +167,36 @@ async def seed_assets_for_campaign(
             continue
 
         channel = channel_by_platform.get(tp.channel_platform)
-        asset = ContentAsset(
-            tenant_id=campaign.tenant_id,
-            campaign_id=campaign.id,
-            channel_id=channel.id if channel else None,
-            asset_type=plan.asset_type,
-            status=AssetStatus.requested,
-            is_required=True,
-            scheduled_at=tp.scheduled_at,
-            extra_metadata={
+        spec = ab_specs.get(tp.channel_platform)
+        variant_count = spec.variants if spec else 1
+
+        variant_rows: list[ContentAsset] = []
+        for variant_idx in range(variant_count):
+            metadata: dict[str, Any] = {
                 "touchpoint_id": str(tp.id),
                 "channel_platform": tp.channel_platform,
-            },
-        )
-        session.add(asset)
-        rows.append(asset)
+            }
+            if spec is not None:
+                metadata["variant_index"] = variant_idx
+                metadata["variant_angle"] = angle_for_index(variant_idx)
+                metadata["is_baseline"] = variant_idx == 0
+
+            asset = ContentAsset(
+                tenant_id=campaign.tenant_id,
+                campaign_id=campaign.id,
+                channel_id=channel.id if channel else None,
+                asset_type=plan.asset_type,
+                status=AssetStatus.requested,
+                is_required=True,
+                scheduled_at=tp.scheduled_at,
+                extra_metadata=metadata,
+            )
+            session.add(asset)
+            variant_rows.append(asset)
+            rows.append(asset)
+
+        if spec is not None and variant_rows:
+            pending_ab_tests.append((spec, variant_rows))
 
     if not rows:
         raise ContentCreatorError(
@@ -163,6 +204,27 @@ async def seed_assets_for_campaign(
         )
 
     await session.flush()
+
+    # Now create the ab_test rows + back-link via metadata.ab_test_group_id.
+    for spec, variant_rows in pending_ab_tests:
+        ab_test = AbTest(
+            tenant_id=campaign.tenant_id,
+            campaign_id=campaign.id,
+            name=f"A/B test: {spec.channel} touchpoint",
+            hypothesis="Variant differentiation per E06-S05",
+            primary_metric=_primary_metric_for_campaign(campaign),
+            status=AbTestStatus.designing,
+            variant_a_id=variant_rows[0].id,
+            variant_b_id=variant_rows[1].id if len(variant_rows) > 1 else None,
+        )
+        session.add(ab_test)
+        await session.flush()
+        for asset in variant_rows:
+            asset.extra_metadata = {
+                **asset.extra_metadata,
+                "ab_test_group_id": str(ab_test.id),
+            }
+        await session.flush()
 
     for asset in rows:
         await enqueue_task(
@@ -218,6 +280,25 @@ async def generate_asset(
             copywriting_tool=copywriting_tool,
             seo_tool=seo_tool,
         )
+    except ComplianceCheckError as exc:
+        # E06-S08 #4: compliance tool unavailable → don't let the draft pass
+        # silently. We mark `failed` with a clear error in metadata rather
+        # than the AC's literal "held in generating" — `failed` is what the
+        # operator UI surfaces as needing attention, and `generating` would
+        # be undone by the outer transaction's rollback on exception anyway.
+        asset.status = AssetStatus.failed
+        asset.extra_metadata = {
+            **asset.extra_metadata,
+            "compliance_error": str(exc),
+        }
+        await session.flush()
+        return {
+            "asset_id": str(asset.id),
+            "asset_type": asset.asset_type.value,
+            "status": asset.status.value,
+            "error": "compliance_check_failed",
+            "message": str(exc),
+        }
     except Exception:
         # Revert so the 'regenerate' action can rerun against the same row.
         asset.status = AssetStatus.requested
@@ -247,19 +328,79 @@ async def _run_generation(
         session, campaign_id=campaign.id, asset=asset
     )
     target_keywords = _target_keywords(campaign)
+    tenant_rules = await _load_compliance_rules(session, tenant_id=campaign.tenant_id)
 
-    cw_inputs = build_copywriting_inputs(
-        plan=plan,
-        campaign_brief=campaign.brief,
-        campaign_objective=campaign.objective,
-        audience_summary=audience_summary,
-        voice_prompt=voice_prompt,
-        touchpoint_position=siblings["position"],
-        total_touchpoints_for_channel=siblings["total"],
-        target_keywords=target_keywords if plan.requires_seo else None,
-        seed=str(asset.id),
-    )
-    cw_output = await copywriting_tool.call(cw_inputs)
+    # Variant context — only set for assets that belong to an ab_test_group.
+    variant_idx = asset.extra_metadata.get("variant_index")
+    variant_angle = str(asset.extra_metadata.get("variant_angle") or "")
+    baseline_body = await _baseline_variant_body(session, asset=asset)
+
+    # Up to SIM_REGEN_MAX_RETRIES + 1 iterations: first the unhinted attempt,
+    # then retries with suppression-keyword / differentiation directives.
+    cw_output: dict[str, Any] = {}
+    compliance_result: ComplianceResult | None = None
+    rewritten_for_suppression = False
+    sim_score: float | None = None
+    suppression_hints: list[str] = []
+    differentiation_hint = False
+
+    for attempt in range(SIM_REGEN_MAX_RETRIES + 1):
+        directives: list[str] = []
+        if variant_angle:
+            directives.append(f"Variant angle: {variant_angle}.")
+        if suppression_hints:
+            directives.append(
+                "Compliance rewrite required — do NOT use these terms: "
+                + ", ".join(sorted(set(suppression_hints)))
+                + "."
+            )
+        if differentiation_hint:
+            directives.append(
+                "This variant is too similar to the baseline. Rewrite with a "
+                "materially different opening, narrative structure, and CTA. "
+                "Keep the channel and offer the same but change the angle."
+            )
+
+        cw_inputs = build_copywriting_inputs(
+            plan=plan,
+            campaign_brief=_brief_with_directives(campaign.brief, directives),
+            campaign_objective=campaign.objective,
+            audience_summary=audience_summary,
+            voice_prompt=voice_prompt,
+            touchpoint_position=siblings["position"],
+            total_touchpoints_for_channel=siblings["total"],
+            target_keywords=target_keywords if plan.requires_seo else None,
+            seed=f"{asset.id}-{attempt}",
+        )
+        cw_output = await copywriting_tool.call(cw_inputs)
+        body_text = str(cw_output.get("body", ""))
+
+        # Compliance check — raises only on unrunnable rule (bad regex). The
+        # outer except in generate_asset turns that into a `generating` hold.
+        compliance_result = check_compliance(body_text, tenant_rules)
+
+        # Decide whether to retry. Block-severity hits don't get retried —
+        # they're surfaced for manager clearance, not rewritten silently.
+        need_suppression_rewrite = bool(compliance_result.warn_keywords)
+        need_differentiation = False
+        if (
+            baseline_body
+            and isinstance(variant_idx, int)
+            and variant_idx > 0
+            and body_text
+        ):
+            sim_score = body_cosine_similarity(baseline_body, body_text)
+            need_differentiation = sim_score > SIMILARITY_THRESHOLD
+
+        if attempt >= SIM_REGEN_MAX_RETRIES:
+            break
+        if not (need_suppression_rewrite or need_differentiation):
+            break
+
+        if need_suppression_rewrite:
+            suppression_hints.extend(compliance_result.warn_keywords)
+            rewritten_for_suppression = True
+        differentiation_hint = need_differentiation
 
     body_text = str(cw_output.get("body", ""))
     dont_words = list(voice.dont_words) if voice is not None else []
@@ -287,6 +428,19 @@ async def _run_generation(
 
     asset.title = extract_title(plan, cw_output)
     asset.content = body_text or None
+
+    metadata_extras: dict[str, Any] = {}
+    if compliance_result is not None:
+        metadata_extras["compliance"] = compliance_result.as_metadata(
+            rewritten_for_suppression=rewritten_for_suppression
+        )
+    if sim_score is not None:
+        metadata_extras["variant_similarity"] = {
+            "score": round(sim_score, 4),
+            "threshold": SIMILARITY_THRESHOLD,
+            "passed": sim_score <= SIMILARITY_THRESHOLD,
+        }
+
     asset.extra_metadata = {
         **asset.extra_metadata,
         **bundle_metadata(
@@ -294,6 +448,7 @@ async def _run_generation(
             brand_check=brand_check,
             seo=seo_payload,
         ),
+        **metadata_extras,
     }
     asset.status = AssetStatus.drafted
     await session.flush()
@@ -305,6 +460,10 @@ async def _run_generation(
         "brand_check_pass": brand_check["pass"],
         "length_warning": cw_output.get("length_warning"),
         "seo_score": (seo_payload or {}).get("score") if seo_payload else None,
+        "compliance_blocked": (
+            compliance_result.blocked if compliance_result else False
+        ),
+        "variant_similarity": metadata_extras.get("variant_similarity"),
     }
 
 
@@ -396,6 +555,73 @@ def _target_keywords(campaign: Campaign) -> list[str]:
     if not isinstance(raw, list):
         return []
     return [str(k).strip() for k in raw if isinstance(k, str) and k.strip()]
+
+
+async def _load_compliance_rules(
+    session: AsyncSession, *, tenant_id: UUID
+) -> list[ComplianceRule]:
+    """Tenant compliance rules for the compliance check (W23, E06-S08)."""
+    return (
+        await session.execute(
+            select(ComplianceRule).where(ComplianceRule.tenant_id == tenant_id)
+        )
+    ).scalars().all()
+
+
+async def _baseline_variant_body(
+    session: AsyncSession, *, asset: ContentAsset
+) -> str | None:
+    """Return the baseline (variant_index=0) variant's body for sim comparison.
+
+    Returns `None` when this asset isn't a non-baseline variant, when the
+    baseline isn't drafted yet (concurrent generation — sim check skipped
+    gracefully), or when there's no body to compare against."""
+    if asset.extra_metadata.get("variant_index", 0) == 0:
+        return None
+    group_id = asset.extra_metadata.get("ab_test_group_id")
+    if not group_id:
+        return None
+
+    rows = (
+        await session.execute(
+            select(ContentAsset).where(
+                ContentAsset.campaign_id == asset.campaign_id,
+                ContentAsset.id != asset.id,
+            )
+        )
+    ).scalars().all()
+    for sibling in rows:
+        if sibling.extra_metadata.get("ab_test_group_id") != group_id:
+            continue
+        if sibling.extra_metadata.get("variant_index") == 0:
+            return sibling.content
+    return None
+
+
+def _brief_with_directives(
+    brief: str | None, directives: list[str]
+) -> str | None:
+    """Append rewrite/variant directives to the brief so they ride through
+    `build_copywriting_inputs` without that helper needing to know about
+    compliance or variants."""
+    sections = [brief.strip()] if brief and brief.strip() else []
+    sections.extend(d for d in directives if d)
+    if not sections:
+        return None
+    return "\n\n".join(sections)
+
+
+def _primary_metric_for_campaign(campaign: Campaign) -> str:
+    """Pull the primary KPI metric off the campaign for the ab_test row.
+
+    Falls back to a sensible default so an ab_test always has a non-empty
+    `primary_metric` (the column is NOT NULL)."""
+    raw = campaign.kpi_targets.get("primary") if campaign.kpi_targets else None
+    if isinstance(raw, dict):
+        metric = raw.get("metric")
+        if isinstance(metric, str) and metric.strip():
+            return metric.strip()
+    return "conversion_rate"
 
 
 async def _channel_sibling_index(

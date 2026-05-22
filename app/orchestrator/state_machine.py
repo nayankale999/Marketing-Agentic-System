@@ -219,8 +219,9 @@ async def _all_required_assets_drafted(
     session: AsyncSession, campaign: Campaign
 ) -> bool:
     """Guard for `submit_for_approval`: no required content_asset is still in
-    a pre-drafted or failed state. Empty asset set blocks — you can't move to
-    approval without any content."""
+    a pre-drafted or failed state, AND no required asset is blocked by a
+    critical compliance hit (W23, E06-S08 #2). Empty asset set blocks — you
+    can't move to approval without any content."""
     total_required = (
         await session.execute(
             select(ContentAsset.id).where(
@@ -232,7 +233,7 @@ async def _all_required_assets_drafted(
     if total_required is None:
         return False
 
-    blocking = (
+    state_blocking = (
         await session.execute(
             select(ContentAsset.id).where(
                 ContentAsset.campaign_id == campaign.id,
@@ -247,7 +248,21 @@ async def _all_required_assets_drafted(
             )
         )
     ).first()
-    return blocking is None
+    if state_blocking is not None:
+        return False
+
+    # E06-S08 #2: critical-severity compliance hits block auto-promotion
+    # until a manager explicitly clears them via /clear-compliance.
+    compliance_blocking = (
+        await session.execute(
+            select(ContentAsset.id).where(
+                ContentAsset.campaign_id == campaign.id,
+                ContentAsset.is_required.is_(True),
+                ContentAsset.extra_metadata["compliance"]["blocked"].astext == "true",
+            )
+        )
+    ).first()
+    return compliance_blocking is None
 
 
 campaign_sm.register(

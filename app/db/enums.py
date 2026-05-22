@@ -136,3 +136,21 @@ class TenantConstraintKind(enum.StrEnum):
 
     forbid_channel = "forbid_channel"
     hard_cap = "hard_cap"
+
+
+class CompliancePatternKind(enum.StrEnum):
+    """How `compliance_rule.keyword` should be matched (W23, E06-S08)."""
+
+    exact = "exact"
+    regex = "regex"
+
+
+class ComplianceSeverity(enum.StrEnum):
+    """How a compliance hit affects the draft (W23, E06-S08).
+
+    `warn` triggers a rewrite-retry to avoid the term; `block` lets the draft
+    land as `drafted` but prevents auto-promotion until a manager clears it.
+    """
+
+    warn = "warn"
+    block = "block"

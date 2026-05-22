@@ -31,6 +31,7 @@ from sqlalchemy.orm import Mapped, mapped_column
 
 from app.db.base import Base
 from app.db.enums import (
+    AbTestStatus,
     AgentKind,
     AgentStatus,
     AssetStatus,
@@ -102,6 +103,12 @@ _ASSET_TYPE = PgEnum(
 _ASSET_STATUS = PgEnum(
     AssetStatus,
     name="asset_status",
+    create_type=False,
+    values_callable=lambda e: [m.value for m in e],
+)
+_AB_TEST_STATUS = PgEnum(
+    AbTestStatus,
+    name="ab_test_status",
     create_type=False,
     values_callable=lambda e: [m.value for m in e],
 )
@@ -638,6 +645,97 @@ class ContentAsset(Base):
     is_required: Mapped[bool] = mapped_column(nullable=False, server_default="true")
     scheduled_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     published_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+
+class ComplianceRule(Base):
+    """Tenant-scoped compliance keyword/pattern (W23, E06-S08).
+
+    `pattern_kind='exact'` matches the keyword on word boundaries (case-
+    insensitive); `pattern_kind='regex'` uses the keyword as a literal regex
+    so admins can express more flexible patterns. Severity drives the agent's
+    response: `warn` triggers rewrite-retry, `block` lets the draft land but
+    flags it for manager clearance before promotion."""
+
+    __tablename__ = "compliance_rule"
+    __table_args__ = (
+        CheckConstraint(
+            "pattern_kind IN ('exact', 'regex')",
+            name="ck_compliance_rule_pattern_kind",
+        ),
+        CheckConstraint(
+            "severity IN ('warn', 'block')",
+            name="ck_compliance_rule_severity",
+        ),
+        UniqueConstraint(
+            "tenant_id", "keyword", name="uq_compliance_rule_tenant_keyword"
+        ),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, server_default=func.gen_random_uuid()
+    )
+    tenant_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("tenant.id", ondelete="CASCADE"), nullable=False
+    )
+    keyword: Mapped[str] = mapped_column(Text, nullable=False)
+    pattern_kind: Mapped[str] = mapped_column(
+        String(20), nullable=False, server_default="exact"
+    )
+    severity: Mapped[str] = mapped_column(
+        String(20), nullable=False, server_default="warn"
+    )
+    description: Mapped[str | None] = mapped_column(Text)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+
+class AbTest(Base):
+    """A/B test grouping for content variants (W23, E06-S05).
+
+    `variant_a_id` and `variant_b_id` hold the canonical first two variants;
+    additional variants (up to 5 total per AC) are linked via
+    `content_asset.extra_metadata.ab_test_group_id` pointing back here, so
+    no schema change is needed to support multivariate."""
+
+    __tablename__ = "ab_test"
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, server_default=func.gen_random_uuid()
+    )
+    tenant_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("tenant.id", ondelete="CASCADE"), nullable=False
+    )
+    campaign_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("campaign.id", ondelete="CASCADE"), nullable=False
+    )
+    name: Mapped[str] = mapped_column(String(200), nullable=False)
+    hypothesis: Mapped[str | None] = mapped_column(Text)
+    primary_metric: Mapped[str] = mapped_column(String(50), nullable=False)
+    status: Mapped[AbTestStatus] = mapped_column(
+        _AB_TEST_STATUS, nullable=False, server_default="designing"
+    )
+    variant_a_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("content_asset.id", ondelete="RESTRICT")
+    )
+    variant_b_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("content_asset.id", ondelete="RESTRICT")
+    )
+    winner_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("content_asset.id", ondelete="RESTRICT")
+    )
+    confidence: Mapped[Decimal | None] = mapped_column(Numeric(5, 4))
+    started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    stopped_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )

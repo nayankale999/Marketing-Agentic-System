@@ -31,7 +31,12 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.audit.context import current_actor_id, current_actor_kind
 from app.audit.writer import column_snapshot, write_audit
+from app.ab_testing.assignment import (
+    AbTestAssignmentError,
+    assign_variant,
+)
 from app.db.enums import (
+    AbTestStatus,
     AgentKind,
     AssetStatus,
     AssetType,
@@ -39,6 +44,7 @@ from app.db.enums import (
     ChannelPlatform,
 )
 from app.db.models import (
+    AbTest,
     Agent,
     Audience,
     AudienceMember,
@@ -286,6 +292,21 @@ async def dispatch_email_asset(
         raise DistributionPreconditionError(
             "no audience members materialised for this campaign"
         )
+
+    # W35 (E09-S02): if this asset is one variant of a running A/B test,
+    # filter the audience down to recipients whose deterministic assignment
+    # lands on this variant. Recipients assigned to a sibling variant are
+    # NOT deduped — they'll be picked up when that sibling's dispatch task
+    # runs.
+    audience_members = await _filter_audience_for_ab_test(
+        session, asset=asset, audience_members=audience_members
+    )
+    if not audience_members:
+        # The test is configured but our slice of the audience is empty
+        # (e.g., 0% split, or no audience members hashed to us this round).
+        # That's not an error — just nothing to send. Fall through so the
+        # asset still flips to `published`.
+        pass
 
     # Skip recipients that already have a sent attempt for this asset (the
     # primary idempotency check, E08-S05 #1) OR a sent attempt to the same
@@ -869,6 +890,73 @@ async def _maybe_go_live(session: AsyncSession, *, campaign: Campaign) -> None:
 
 def _idempotency_key(content_asset_id: UUID, recipient_email: str) -> str:
     return f"asset:{content_asset_id}:recipient:{recipient_email.lower()}"
+
+
+async def _filter_audience_for_ab_test(
+    session: AsyncSession,
+    *,
+    asset: ContentAsset,
+    audience_members: list[AudienceMember],
+) -> list[AudienceMember]:
+    """W35 (E09-S02): keep only the recipients deterministically assigned
+    to `asset` under the asset's running A/B test, if any.
+
+    Lookup chain: the asset's `extra_metadata.ab_test_group_id` is the
+    canonical link; fallback to AbTest.variant_a/b_id when the metadata is
+    missing (older flows). If no running test is found we return the
+    original audience unchanged — A/B testing is opt-in per asset.
+    """
+    ab_test = await _running_ab_test_for_asset(session, asset=asset)
+    if ab_test is None:
+        return audience_members
+
+    kept: list[AudienceMember] = []
+    for member in audience_members:
+        external = member.external_id
+        if not external:
+            # No stable id to hash — skip A/B for this member entirely. The
+            # send still happens via the originally-scheduled asset because
+            # we keep them in the kept list. Recipients without external_id
+            # are rare (only manual seeds).
+            kept.append(member)
+            continue
+        try:
+            assigned = await assign_variant(
+                session,
+                tenant_id=asset.tenant_id,
+                ab_test_id=ab_test.id,
+                audience_external_id=external,
+            )
+        except AbTestAssignmentError:
+            # Misconfigured test — fall back to the original asset rather
+            # than failing the whole dispatch.
+            kept.append(member)
+            continue
+        if assigned == asset.id:
+            kept.append(member)
+    return kept
+
+
+async def _running_ab_test_for_asset(
+    session: AsyncSession, *, asset: ContentAsset
+) -> AbTest | None:
+    ab_test_id_meta = (asset.extra_metadata or {}).get("ab_test_group_id")
+    if isinstance(ab_test_id_meta, str):
+        try:
+            ab_test_id = UUID(ab_test_id_meta)
+        except (ValueError, TypeError):
+            return None
+        ab_test = await session.get(AbTest, ab_test_id)
+        if ab_test is not None and ab_test.status == AbTestStatus.running:
+            return ab_test
+
+    # Fallback: a test where variant_a/b_id points at this asset.
+    stmt = select(AbTest).where(
+        AbTest.tenant_id == asset.tenant_id,
+        AbTest.status == AbTestStatus.running,
+        (AbTest.variant_a_id == asset.id) | (AbTest.variant_b_id == asset.id),
+    )
+    return (await session.execute(stmt)).scalars().first()
 
 
 def _touchpoint_id_for(asset: ContentAsset) -> UUID | None:

@@ -1,18 +1,23 @@
-"""A/B test endpoints (W23, E06-S05).
+"""A/B test endpoints (W23, E06-S05; W35, E09-S01/02).
 
   - GET   /api/campaigns/{id}/ab-tests          — list tests for a campaign
+  - POST  /api/campaigns/{id}/ab-tests          — create a new A/B test (W35)
   - GET   /api/ab-tests/{id}                    — detail including every linked variant id
   - POST  /api/ab-tests/{id}/add-variant        — fan out one more variant, up to MAX_VARIANTS
+  - POST  /api/ab-tests/{id}/launch             — designing → running (W35)
+  - POST  /api/ab-tests/{id}/stop               — running → stopped (W35)
 
 Variant assets are joined back to their parent ab_test via
 `content_asset.extra_metadata.ab_test_group_id` so the multivariate case
 (>2 variants per AC #3) doesn't need a schema change.
 """
 
+from datetime import UTC, datetime
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.agents._variants import MAX_VARIANTS, angle_for_index
@@ -23,9 +28,10 @@ from app.api.schemas.ab_test import (
     AbTestListResponse,
     AbTestOut,
     AddVariantResponse,
+    CreateAbTestRequest,
 )
-from app.db.enums import AssetStatus, AssetType, UserRole
-from app.db.models import AbTest, AppUser, ContentAsset
+from app.db.enums import AbTestStatus, AssetStatus, AssetType, UserRole
+from app.db.models import AbTest, AppUser, Campaign, ContentAsset
 from app.orchestrator.queue import enqueue_task
 from app.settings.config import get_settings
 
@@ -151,6 +157,198 @@ async def add_variant(
         variant_index=next_index,
         task_id=task.id,
     )
+
+
+# ---------------------------------------------------------------------------
+# W35 — define / launch / stop
+# ---------------------------------------------------------------------------
+
+
+# Asset statuses that prove the variant has cleared review and is safe to
+# launch on. We accept both `approved` (just approved, not yet scheduled by
+# the distribution agent) and `scheduled` (auto-advanced — see W28).
+_LAUNCH_READY_STATUSES = {AssetStatus.approved, AssetStatus.scheduled}
+
+
+@campaigns_router.post(
+    "/{campaign_id}/ab-tests",
+    response_model=AbTestOut,
+    status_code=status.HTTP_201_CREATED,
+)
+async def create_ab_test(
+    campaign_id: UUID,
+    body: CreateAbTestRequest,
+    user: AppUser = Depends(require_role(UserRole.marketer)),
+    db: AsyncSession = Depends(get_tenant_db),
+) -> AbTestOut:
+    """W35 (E09-S01): define an A/B test on existing variants.
+
+    Validates split sums to 100, every variant belongs to this campaign,
+    no duplicate variant ids. Rejects if there is already an active
+    (`designing`/`running`) test on the same variant_a — the partial
+    unique index in migration 0018 backstops this at the DB level too."""
+    campaign = await db.get(Campaign, campaign_id)
+    if campaign is None or campaign.tenant_id != user.tenant_id:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, detail="campaign not found")
+
+    if len(set(body.variant_ids)) != len(body.variant_ids):
+        raise HTTPException(
+            status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="duplicate variant ids in request",
+        )
+
+    split_total = sum(body.traffic_split.values())
+    if split_total != 100:
+        raise HTTPException(
+            status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=f"traffic_split must sum to 100, got {split_total}",
+        )
+    if set(body.traffic_split.keys()) != set(body.variant_ids):
+        raise HTTPException(
+            status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="traffic_split keys must match variant_ids exactly",
+        )
+
+    variants = (
+        await db.execute(
+            select(ContentAsset).where(
+                ContentAsset.id.in_(body.variant_ids),
+                ContentAsset.tenant_id == user.tenant_id,
+            )
+        )
+    ).scalars().all()
+    if len(variants) != len(body.variant_ids):
+        raise HTTPException(
+            status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="one or more variants not found",
+        )
+    for v in variants:
+        if v.campaign_id != campaign_id:
+            raise HTTPException(
+                status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail=f"variant {v.id} does not belong to campaign {campaign_id}",
+            )
+
+    ab_test = AbTest(
+        tenant_id=user.tenant_id,
+        campaign_id=campaign_id,
+        name=body.name,
+        hypothesis=body.hypothesis,
+        primary_metric=body.primary_metric,
+        status=AbTestStatus.designing,
+        variant_a_id=body.variant_ids[0],
+        variant_b_id=body.variant_ids[1],
+        traffic_split={str(k): int(v) for k, v in body.traffic_split.items()},
+        min_runtime_hours=body.min_runtime_hours,
+        max_runtime_hours=body.max_runtime_hours,
+    )
+    db.add(ab_test)
+    try:
+        await db.flush()
+    except IntegrityError as exc:
+        # uq_ab_test_active_per_variant_a — second active test on the
+        # same family.
+        raise HTTPException(
+            status.HTTP_409_CONFLICT,
+            detail="an active A/B test already exists on this asset family",
+        ) from exc
+
+    # Link any 'extra' variants (3rd+) via extra_metadata so existing
+    # _list_variants still finds them.
+    for variant in variants:
+        meta = dict(variant.extra_metadata or {})
+        meta["ab_test_group_id"] = str(ab_test.id)
+        variant.extra_metadata = meta
+    await db.flush()
+
+    return AbTestOut.model_validate(ab_test)
+
+
+@ab_tests_router.post(
+    "/{ab_test_id}/launch",
+    response_model=AbTestOut,
+)
+async def launch_ab_test(
+    ab_test_id: UUID,
+    _user: AppUser = Depends(require_role(UserRole.marketer)),
+    db: AsyncSession = Depends(get_tenant_db),
+) -> AbTestOut:
+    """W35 (E09-S01 AC #4): block launch until every variant is approved.
+
+    The asset family progresses through `pending_approval` (E07) →
+    `approved` → `scheduled` (E08). Either of the last two is fine; the
+    earlier two are not."""
+    ab_test = await db.get(AbTest, ab_test_id)
+    if ab_test is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, detail="ab_test not found")
+    if ab_test.status != AbTestStatus.designing:
+        raise HTTPException(
+            status.HTTP_409_CONFLICT,
+            detail=f"ab_test is in status '{ab_test.status.value}', expected 'designing'",
+        )
+
+    variants = await _list_variants(db, ab_test_id=ab_test_id)
+    # Fallback when the family was never registered via extra_metadata
+    # (older tests, or this one before add-variant fan-out).
+    if not variants:
+        ids = [ab_test.variant_a_id, ab_test.variant_b_id]
+        ids = [i for i in ids if i is not None]
+        if ids:
+            variants = list(
+                (
+                    await db.execute(
+                        select(ContentAsset).where(ContentAsset.id.in_(ids))
+                    )
+                ).scalars().all()
+            )
+
+    if not variants:
+        raise HTTPException(
+            status.HTTP_409_CONFLICT,
+            detail="ab_test has no variants to launch",
+        )
+
+    not_ready = [v for v in variants if v.status not in _LAUNCH_READY_STATUSES]
+    if not_ready:
+        raise HTTPException(
+            status.HTTP_409_CONFLICT,
+            detail={
+                "reason": "variants_not_approved",
+                "variant_ids": [str(v.id) for v in not_ready],
+                "statuses": [v.status.value for v in not_ready],
+            },
+        )
+
+    ab_test.status = AbTestStatus.running
+    ab_test.started_at = datetime.now(UTC)
+    await db.flush()
+    return AbTestOut.model_validate(ab_test)
+
+
+@ab_tests_router.post(
+    "/{ab_test_id}/stop",
+    response_model=AbTestOut,
+)
+async def stop_ab_test(
+    ab_test_id: UUID,
+    _user: AppUser = Depends(require_role(UserRole.manager)),
+    db: AsyncSession = Depends(get_tenant_db),
+) -> AbTestOut:
+    """W35 (E09-S03 AC #4 trailer): manual stop sets status without auto-
+    setting a winner, even if one arm is numerically ahead."""
+    ab_test = await db.get(AbTest, ab_test_id)
+    if ab_test is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, detail="ab_test not found")
+    if ab_test.status not in {AbTestStatus.designing, AbTestStatus.running}:
+        raise HTTPException(
+            status.HTTP_409_CONFLICT,
+            detail=f"ab_test is in status '{ab_test.status.value}'",
+        )
+
+    ab_test.status = AbTestStatus.stopped
+    ab_test.stopped_at = datetime.now(UTC)
+    await db.flush()
+    return AbTestOut.model_validate(ab_test)
 
 
 async def _list_variants(

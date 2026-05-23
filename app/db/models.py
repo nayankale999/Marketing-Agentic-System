@@ -741,12 +741,59 @@ class AbTest(Base):
         UUID(as_uuid=True), ForeignKey("content_asset.id", ondelete="RESTRICT")
     )
     confidence: Mapped[Decimal | None] = mapped_column(Numeric(5, 4))
+    # W35 (E09-S01): integer percentages keyed by str(variant_id). Validated
+    # at the API layer to sum to 100 across all variants in the test.
+    traffic_split: Mapped[dict[str, Any]] = mapped_column(
+        JSONB, nullable=False, server_default="{}"
+    )
+    min_runtime_hours: Mapped[int | None] = mapped_column(Integer)
+    max_runtime_hours: Mapped[int | None] = mapped_column(Integer)
     started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     stopped_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )
     updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+
+class AbTestAssignment(Base):
+    """One row per (recipient × A/B test) — the permanent assignment that
+    keeps a recipient on the same arm across retries and later steps
+    (W35, E09-S02).
+
+    `audience_external_id` mirrors the dispatch_attempt soft-reference
+    pattern: audience_member uses a composite PK, so we record the external
+    id rather than an FK. The UNIQUE (tenant_id, ab_test_id,
+    audience_external_id) is the race-safe insert key."""
+
+    __tablename__ = "ab_test_assignment"
+    __table_args__ = (
+        UniqueConstraint(
+            "tenant_id",
+            "ab_test_id",
+            "audience_external_id",
+            name="uq_ab_test_assignment_tenant_test_audience",
+        ),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, server_default=func.gen_random_uuid()
+    )
+    tenant_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("tenant.id", ondelete="CASCADE"), nullable=False
+    )
+    ab_test_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("ab_test.id", ondelete="CASCADE"), nullable=False
+    )
+    audience_external_id: Mapped[str] = mapped_column(String(200), nullable=False)
+    variant_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("content_asset.id", ondelete="RESTRICT"),
+        nullable=False,
+    )
+    assigned_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )
 

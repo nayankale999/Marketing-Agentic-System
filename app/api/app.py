@@ -11,6 +11,7 @@ from app.api import (
     _protected,
     ab_tests,
     admin_unmapped_events,
+    analytics_kpis,
     approval_settings,
     approvals,
     audiences,
@@ -81,6 +82,7 @@ def create_app() -> FastAPI:
     application.include_router(provider_rate_limits.router)
     application.include_router(webhooks.router)
     application.include_router(admin_unmapped_events.router)
+    application.include_router(analytics_kpis.router)
     application.include_router(tenant_constraints.router)
     application.include_router(ui_campaigns.router)
     application.include_router(ui_approvals.router)

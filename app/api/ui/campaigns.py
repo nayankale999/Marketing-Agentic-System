@@ -20,6 +20,7 @@ from app.db.models import (
     AppUser,
     Audience,
     Campaign,
+    CampaignReport,
     ContentAsset,
     StrategyProposal,
     StrategyTouchpoint,
@@ -102,4 +103,34 @@ async def campaign_detail(
             "touchpoints": touchpoints,
             "owner_label": owner_label,
         },
+    )
+
+
+@router.get("/{campaign_id}/report", response_class=HTMLResponse)
+async def campaign_report(
+    campaign_id: UUID,
+    request: Request,
+    _user: AppUser = Depends(require_role(UserRole.viewer)),
+    db: AsyncSession = Depends(get_tenant_db),
+) -> HTMLResponse:
+    """W38 (E13-S04): server-rendered campaign report. Charts are a
+    polish unit — this view renders tables/lists so the report is
+    readable without a JS dependency."""
+    campaign = await db.get(Campaign, campaign_id)
+    if campaign is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, detail="campaign not found")
+
+    report = (
+        await db.execute(
+            select(CampaignReport).where(
+                CampaignReport.campaign_id == campaign_id,
+                CampaignReport.is_latest.is_(True),
+            )
+        )
+    ).scalar_one_or_none()
+
+    return templates.TemplateResponse(
+        request,
+        "campaigns/report.html",
+        {"campaign": campaign, "report": report},
     )

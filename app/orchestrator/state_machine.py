@@ -518,3 +518,40 @@ campaign_sm.register(
         on_enter=_resume_distribution,
     )
 )
+
+
+async def _auto_generate_report(
+    session: AsyncSession, campaign: Campaign
+) -> None:
+    """on_enter for `complete_campaign` (W38, E10-S04). Snapshots the
+    final report so a regeneration is never needed to share with
+    stakeholders. Late-arriving data still produces a v2 if someone hits
+    the regenerate endpoint."""
+    from datetime import UTC, datetime
+
+    from app.analytics.report import generate_report
+
+    await generate_report(
+        session,
+        tenant_id=campaign.tenant_id,
+        campaign_id=campaign.id,
+        now=datetime.now(UTC),
+        generated_by="system",
+    )
+
+
+# Complete can fire from any active-or-paused state. Same shape as the
+# pause registrations above.
+for _complete_from in (
+    CampaignStatus.live,
+    CampaignStatus.optimising,
+    CampaignStatus.paused,
+):
+    campaign_sm.register(
+        Transition(
+            name="complete_campaign",
+            from_state=_complete_from,
+            to_state=CampaignStatus.completed,
+            on_enter=_auto_generate_report,
+        )
+    )

@@ -32,6 +32,7 @@ from app.api import (
     me,
     preview,
     provider_rate_limits,
+    reports,
     strategy,
     tenant_constraints,
     unsubscribe,
@@ -85,6 +86,7 @@ def create_app() -> FastAPI:
     application.include_router(admin_unmapped_events.router)
     application.include_router(analytics_kpis.router)
     application.include_router(analytics.anomalies_router)
+    application.include_router(reports.router)
     application.include_router(tenant_constraints.router)
     application.include_router(ui_campaigns.router)
     application.include_router(ui_approvals.router)

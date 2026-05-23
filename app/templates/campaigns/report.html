@@ -1,0 +1,166 @@
+{% extends "base.html" %}
+{% from "_macros.html" import status_badge, section_heading, empty_state %}
+
+{% block title %}{{ campaign.name }} — Report — MAS{% endblock %}
+
+{% block content %}
+  <header class="stack">
+    <div class="cluster">
+      <h1>{{ campaign.name }} — Report</h1>
+      {{ status_badge(campaign.status.value) }}
+      {% if campaign.status.value == "live" %}
+        <span class="badge warn">in-flight · live data</span>
+      {% endif %}
+    </div>
+    <div class="muted small">
+      {% if report %}
+        Version {{ report.version }} · generated {{ report.generated_at.strftime("%Y-%m-%d %H:%M %Z") }} by {{ report.generated_by }}
+        {% if not report.is_latest %} · superseded{% endif %}
+      {% else %}
+        No report has been generated yet.
+      {% endif %}
+    </div>
+    {% if report %}
+      <div class="cluster">
+        <a class="button"
+           href="/api/campaigns/{{ campaign.id }}/reports/latest.csv">Export CSV</a>
+      </div>
+    {% endif %}
+  </header>
+
+  {% if not report %}
+    {{ empty_state("Generate a report via POST /api/campaigns/" ~ campaign.id ~ "/reports.") }}
+  {% else %}
+    {% set d = report.data %}
+
+    <section class="card">
+      {{ section_heading("Objectives", "objectives") }}
+      <dl class="grid-2">
+        <dt>Objective</dt><dd>{{ d.objectives.objective or "—" }}</dd>
+        <dt>Brief</dt><dd>{{ d.objectives.brief or "—" }}</dd>
+        <dt>Budget</dt><dd>{{ d.objectives.budget_total }} {{ d.objectives.currency }}</dd>
+        <dt>Window</dt><dd>{{ d.objectives.start_date }} → {{ d.objectives.end_date }}</dd>
+      </dl>
+    </section>
+
+    <section class="card">
+      {{ section_heading("KPIs vs Target", "kpis") }}
+      {% if d.kpis_vs_target %}
+        <table class="data-table">
+          <thead><tr><th>Metric</th><th>Target</th><th>Observed</th><th>Δ%</th></tr></thead>
+          <tbody>
+            {% for k in d.kpis_vs_target %}
+              <tr>
+                <td>{{ k.name }}</td>
+                <td>{{ k.target if k.target is not none else "—" }}</td>
+                <td>{{ k.observed if k.observed is not none else "no data" }}</td>
+                <td>{{ k.delta_pct if k.delta_pct is not none else "—" }}</td>
+              </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      {% else %}
+        {{ empty_state("No KPI targets configured.") }}
+      {% endif %}
+    </section>
+
+    <section class="card">
+      {{ section_heading("Channel Breakdown", "channels") }}
+      {% if d.channel_breakdown %}
+        <table class="data-table">
+          <thead><tr><th>Channel</th><th>Impressions</th><th>Opens</th><th>Clicks</th><th>Conversions</th><th>Spend</th></tr></thead>
+          <tbody>
+            {% for c in d.channel_breakdown %}
+              <tr>
+                <td>{{ c.name }}</td>
+                <td>{{ c.impressions }}</td>
+                <td>{{ c.opens }}</td>
+                <td>{{ c.clicks }}</td>
+                <td>{{ c.conversions }}</td>
+                <td>{{ c.spend }}</td>
+              </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      {% else %}
+        {{ empty_state("No channel events recorded yet.") }}
+      {% endif %}
+    </section>
+
+    <section class="card">
+      {{ section_heading("A/B Tests", "ab-tests") }}
+      {% if d.ab_tests %}
+        <table class="data-table">
+          <thead><tr><th>Name</th><th>Status</th><th>Metric</th><th>Winner</th><th>Confidence</th><th>Lift</th></tr></thead>
+          <tbody>
+            {% for t in d.ab_tests %}
+              <tr>
+                <td>{{ t.name }}</td>
+                <td>{{ t.status }}</td>
+                <td>{{ t.primary_metric }}</td>
+                <td>{{ t.winner_id or "—" }}</td>
+                <td>{{ t.confidence or "—" }}</td>
+                <td>{{ t.lift or "—" }}</td>
+              </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      {% else %}
+        {{ empty_state("No A/B tests on this campaign.") }}
+      {% endif %}
+    </section>
+
+    <section class="card">
+      {{ section_heading("Anomalies", "anomalies") }}
+      {% if d.anomalies %}
+        <table class="data-table">
+          <thead><tr><th>Metric</th><th>Severity</th><th>σ</th><th>Observed</th><th>Median</th><th>Dismissed</th></tr></thead>
+          <tbody>
+            {% for a in d.anomalies %}
+              <tr>
+                <td>{{ a.metric }}</td>
+                <td>{{ a.severity }}</td>
+                <td>{{ a.sigma }}</td>
+                <td>{{ a.observed_value }}</td>
+                <td>{{ a.baseline_median }}</td>
+                <td>{{ "yes" if a.dismissed_at else "—" }}</td>
+              </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      {% else %}
+        {{ empty_state("No anomalies recorded.") }}
+      {% endif %}
+    </section>
+
+    <section class="card">
+      {{ section_heading("Recommendations", "recommendations") }}
+      <h3>Applied</h3>
+      {% if d.recommendations_applied %}
+        <ul>
+          {% for r in d.recommendations_applied %}
+            <li><strong>{{ r.kind }}</strong> — {{ r.rationale or "" }}</li>
+          {% endfor %}
+        </ul>
+      {% else %}
+        {{ empty_state("No recommendations applied.") }}
+      {% endif %}
+
+      <h3>Rejected</h3>
+      {% if d.recommendations_rejected %}
+        <ul>
+          {% for r in d.recommendations_rejected %}
+            <li><strong>{{ r.kind }}</strong> — {{ r.rationale or "" }}</li>
+          {% endfor %}
+        </ul>
+      {% else %}
+        {{ empty_state("No recommendations rejected.") }}
+      {% endif %}
+    </section>
+
+    <section class="card">
+      {{ section_heading("Spend", "spend") }}
+      <p>Total: {{ d.spend_total if d.spend_total is not none else "no data" }} {{ d.objectives.currency }}</p>
+    </section>
+  {% endif %}
+{% endblock %}

@@ -1216,3 +1216,46 @@ class OptimisationRecommendation(Base):
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )
+
+
+class CampaignReport(Base):
+    """Versioned end-of-campaign performance report snapshot (W38, E10-S04).
+
+    Append-only: each regeneration writes a fresh row with `version=N+1`
+    and flips the prior latest row's `is_latest` to false (the partial
+    unique index in migration 0021 backstops the invariant). `data` is
+    the full JSON payload — `objectives`, `kpis_vs_target`,
+    `channel_breakdown`, `ab_tests`, `anomalies`,
+    `recommendations_applied`, `recommendations_rejected`, `spend_total`.
+    """
+
+    __tablename__ = "campaign_report"
+    __table_args__ = (
+        UniqueConstraint(
+            "tenant_id",
+            "campaign_id",
+            "version",
+            name="uq_campaign_report_tenant_campaign_version",
+        ),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, server_default=func.gen_random_uuid()
+    )
+    tenant_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("tenant.id", ondelete="CASCADE"), nullable=False
+    )
+    campaign_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("campaign.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    version: Mapped[int] = mapped_column(Integer, nullable=False)
+    generated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+    generated_by: Mapped[str] = mapped_column(String(100), nullable=False)
+    data: Mapped[dict[str, Any]] = mapped_column(
+        JSONB, nullable=False, server_default="{}"
+    )
+    is_latest: Mapped[bool] = mapped_column(nullable=False, server_default="false")

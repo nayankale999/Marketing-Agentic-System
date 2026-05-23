@@ -200,8 +200,10 @@ async def test_budget_shift_fires_when_channels_diverge(
     assert rec.status == "pending"
     assert rec.proposal["from"]["channel"] == "LinkedIn"
     assert rec.proposal["to"]["channel"] == "Email"
-    # 20% of 50 = 10.
-    assert rec.proposal["shifted_pct"] == pytest.approx(10.0)
+    # W39: default 30% of laggard's allocation (clamped to [10%, 50%]).
+    assert rec.proposal["shift_pct"] == pytest.approx(30.0)
+    assert rec.proposal["confidence"] in {"low", "medium", "high"}
+    assert rec.proposal["outcome"] in {"conversion", "click"}
     assert rec.predicted_uplift is not None and rec.predicted_uplift >= Decimal(0)
     assert rec.rationale and "ratio" in rec.rationale
 
@@ -227,7 +229,7 @@ async def test_channels_too_close_does_not_fire(db_engine: AsyncEngine) -> None:
     world = await _seed_world(
         db_engine,
         channel_a_clicks=80,
-        channel_b_clicks=70,  # 1.14× ratio, well below the 1.5× floor
+        channel_b_clicks=70,  # 1.14× CPO ratio, below the 1.2× floor
     )
     async with AsyncSession(db_engine, expire_on_commit=False) as session, session.begin():
         recs = await generate_recommendations(

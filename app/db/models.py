@@ -1218,6 +1218,42 @@ class OptimisationRecommendation(Base):
     )
 
 
+class CampaignChannelBudget(Base):
+    """Per-channel allocated + spent amounts for a campaign (W39, E10-S05).
+
+    Created at seed time (defined in the initial schema snapshot, migration
+    0001). Composite primary key on (campaign_id, channel_id) — one row per
+    channel per campaign. `allocated` is the budget plan; `spent` is the
+    running total updated by the dispatchers / spend reconciler.
+
+    RLS chain: the table's policy filters by `campaign_id IN (SELECT id
+    FROM campaign)`, which itself filters by `tenant_id = app.tenant_id`.
+    No `tenant_id` column needed here.
+    """
+
+    __tablename__ = "campaign_channel_budget"
+
+    campaign_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("campaign.id", ondelete="CASCADE"),
+        primary_key=True,
+    )
+    channel_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("channel.id", ondelete="RESTRICT"),
+        primary_key=True,
+    )
+    allocated: Mapped[Decimal] = mapped_column(
+        Numeric(14, 2), nullable=False, server_default="0"
+    )
+    spent: Mapped[Decimal] = mapped_column(
+        Numeric(14, 2), nullable=False, server_default="0"
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+
 class CampaignReport(Base):
     """Versioned end-of-campaign performance report snapshot (W38, E10-S04).
 

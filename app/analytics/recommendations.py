@@ -1,16 +1,19 @@
-"""Optimisation recommendations (W37, E10-S03).
+"""Optimisation recommendations (W37, E10-S03; W39, E10-S05).
 
 Rules-based generator for the Analytics & Optimisation agent. The rules
 emit `optimisation_recommendation` rows that a marketer can accept /
 reject in the UI.
 
-What ships in W37
------------------
-  * `budget_shift` — if one channel's clicks-per-spend (or impressions-
-    per-spend, when click data is sparse) is meaningfully higher than
-    another's over the past 7 days, propose moving 20% of the laggard's
-    allocation to the leader. Predicted uplift = delta-CTR × shifted
-    spend / total spend.
+What ships
+----------
+  * `budget_shift` (W39 refines W37) — compute **cost-per-outcome**
+    (conversions if any, else clicks) per channel. If the leader's CPO
+    is materially better than the laggard's, propose moving 30% of the
+    laggard's allocation, clamped to [10%, 50%]. Honors per-channel
+    `min_daily_spend` if set on `channel.api_config` (clamping the
+    shift; if the clamp pushes it below 10%, drop the proposal). The
+    proposal carries a confidence label ("low" / "medium" / "high")
+    derived from the CPO ratio.
 
 Future rules (called out so the structure absorbs them cleanly)
 ---------------------------------------------------------------
@@ -43,16 +46,24 @@ from app.db.models import (
 )
 
 
-# E10-S03 requires "7 days of data". We honour that as the minimum
-# campaign age; rules that need more data raise their floor.
-MIN_DATA_DAYS = 7
+# E10-S05 AC #1: need at least 5 days of data for the budget rule.
+# Other rules can raise their floor; the constant is the minimum any
+# rule honours.
+MIN_DATA_DAYS = 5
 
-# Two-arm budget shift: if the leader's CPC (or CPI for impression-only
-# channels) is at least this much better than the laggard's, recommend.
-_BUDGET_SHIFT_MIN_RATIO = Decimal("1.5")
-# Cap on how much of the laggard's spend we propose moving, so a single
-# proposal can't redirect the whole allocation. The marketer can iterate.
-_BUDGET_SHIFT_PCT = Decimal("0.20")
+# Budget-shift rule (W39, E10-S05).
+# Default shift sizing: 30% of the laggard's allocation. Clamped to a
+# [floor, ceiling] band so a single proposal is meaningful but won't
+# redirect the entire allocation.
+_BUDGET_SHIFT_DEFAULT_PCT = Decimal("0.30")
+_BUDGET_SHIFT_FLOOR_PCT = Decimal("0.10")   # AC #1: shifts > 10% only
+_BUDGET_SHIFT_CEILING_PCT = Decimal("0.50")
+
+# CPO ratio thresholds → confidence label. Below the min ratio we don't
+# propose at all.
+_BUDGET_SHIFT_MIN_RATIO = Decimal("1.2")
+_CONFIDENCE_HIGH_RATIO = Decimal("2.0")
+_CONFIDENCE_MEDIUM_RATIO = Decimal("1.5")
 
 
 @dataclass(frozen=True)
@@ -62,12 +73,18 @@ class ChannelMetric:
     spend: Decimal
     clicks: int
     impressions: int
+    conversions: int
+    min_daily_spend: Decimal | None  # from channel.api_config, if set
 
-    @property
-    def click_per_spend(self) -> Decimal:
+    def cost_per_outcome(self, *, outcome: str) -> Decimal:
+        """`outcome ∈ {"conversion", "click"}`. Returns 0 when the channel
+        has no spend or no outcomes — the caller filters those out."""
         if self.spend <= 0:
             return Decimal(0)
-        return Decimal(self.clicks) / self.spend
+        count = self.conversions if outcome == "conversion" else self.clicks
+        if count <= 0:
+            return Decimal(0)
+        return self.spend / Decimal(count)
 
 
 @dataclass(frozen=True)
@@ -143,8 +160,10 @@ async def _try_budget_shift(
     campaign_id: UUID,
     now: datetime,
 ) -> ProposalBundle | None:
-    """If we can find a clearly-leading channel and a clearly-lagging
-    channel, propose a 20% shift from laggard → leader."""
+    """W39 (E10-S05): find a leader + laggard channel by cost-per-outcome,
+    propose a 30%-of-laggard shift clamped to [10%, 50%] and to any
+    per-channel min_daily_spend floor.
+    """
     cutoff = now - timedelta(days=MIN_DATA_DAYS)
     metrics = await _channel_metrics(
         session,
@@ -155,49 +174,91 @@ async def _try_budget_shift(
     if len(metrics) < 2:
         return None
 
-    # Filter to channels with non-zero spend AND non-zero clicks — we
-    # need both to compute click_per_spend meaningfully.
-    eligible = [m for m in metrics if m.spend > 0 and m.clicks > 0]
+    # Pick the outcome that has data across the campaign. Conversions
+    # are the canonical "outcome" for E10-S05; fall back to clicks when
+    # the campaign hasn't logged any conversions anywhere yet.
+    total_conversions = sum(m.conversions for m in metrics)
+    outcome = "conversion" if total_conversions > 0 else "click"
+
+    eligible = [
+        m for m in metrics
+        if m.spend > 0 and (m.conversions if outcome == "conversion" else m.clicks) > 0
+    ]
     if len(eligible) < 2:
         return None
 
-    eligible.sort(key=lambda m: m.click_per_spend, reverse=True)
-    leader = eligible[0]
-    laggard = eligible[-1]
-    if laggard.click_per_spend == 0:
+    eligible.sort(key=lambda m: m.cost_per_outcome(outcome=outcome))
+    leader = eligible[0]   # lowest CPO = best
+    laggard = eligible[-1]  # highest CPO = worst
+    leader_cpo = leader.cost_per_outcome(outcome=outcome)
+    laggard_cpo = laggard.cost_per_outcome(outcome=outcome)
+    if leader_cpo <= 0:
         return None
-    if leader.click_per_spend / laggard.click_per_spend < _BUDGET_SHIFT_MIN_RATIO:
+    ratio = laggard_cpo / leader_cpo
+    if ratio < _BUDGET_SHIFT_MIN_RATIO:
         return None
 
-    proposal_payload = await _resolve_strategy_allocations(
+    confidence = _confidence_label(ratio)
+
+    allocations = await _resolve_strategy_allocations(
         session, tenant_id=tenant_id, campaign_id=campaign_id
     )
-    if not proposal_payload:
+    if not allocations:
         return None
-
-    # Find the laggard's allocation; bail if it's not in the proposal.
-    laggard_alloc = proposal_payload.get(laggard.name)
-    leader_alloc = proposal_payload.get(leader.name)
+    laggard_alloc = allocations.get(laggard.name)
+    leader_alloc = allocations.get(leader.name)
     if laggard_alloc is None or leader_alloc is None:
         return None
 
-    shifted_pct = float(_BUDGET_SHIFT_PCT * Decimal(laggard_alloc["allocation_pct"]))
-    new_laggard_pct = laggard_alloc["allocation_pct"] - shifted_pct
-    new_leader_pct = leader_alloc["allocation_pct"] + shifted_pct
-
-    delta_cpc = leader.click_per_spend - laggard.click_per_spend
-    total_spend = sum((m.spend for m in metrics), Decimal(0))
-    if total_spend <= 0:
+    laggard_alloc_amount = _as_decimal(laggard_alloc.get("allocation_amount"))
+    if laggard_alloc_amount is None or laggard_alloc_amount <= 0:
         return None
-    # Predicted uplift, as fraction of total clicks: (Δcpc × shifted spend)
-    # / current_total_clicks. Bound to [0, 1] so the column is happy.
-    shifted_spend = laggard.spend * _BUDGET_SHIFT_PCT
-    extra_clicks = delta_cpc * shifted_spend
-    current_clicks = sum((Decimal(m.clicks) for m in metrics), Decimal(0))
-    predicted_uplift = (
-        extra_clicks / current_clicks if current_clicks > 0 else Decimal(0)
+
+    # Default shift = 30% of laggard's allocation, clamped to the band.
+    shift_pct = _BUDGET_SHIFT_DEFAULT_PCT
+    proposed_amount = laggard_alloc_amount * shift_pct
+
+    # AC #4: honour any per-channel minimum daily spend floor on the
+    # laggard. We can't drop it below floor over the remaining window.
+    floor_note: str | None = None
+    if laggard.min_daily_spend is not None and laggard.min_daily_spend > 0:
+        # Conservative floor: don't reduce laggard's allocation below
+        # min_daily_spend * remaining_days. For MVP we just clamp to
+        # `min_daily_spend` (assumes >=1 day remaining); a fuller
+        # remaining-window calculation is a polish unit.
+        max_shift_amount = laggard_alloc_amount - laggard.min_daily_spend
+        if max_shift_amount < proposed_amount:
+            proposed_amount = max(max_shift_amount, Decimal(0))
+            floor_note = (
+                f" Shift clamped to keep '{laggard.name}' above its "
+                f"minimum daily spend floor of {laggard.min_daily_spend}."
+            )
+
+    # Drop proposals that don't move enough to matter.
+    shift_pct_actual = (
+        proposed_amount / laggard_alloc_amount if laggard_alloc_amount > 0 else Decimal(0)
     )
-    # Clamp to the column's NUMERIC(6,4) range.
+    if shift_pct_actual < _BUDGET_SHIFT_FLOOR_PCT:
+        return None
+    if shift_pct_actual > _BUDGET_SHIFT_CEILING_PCT:
+        proposed_amount = laggard_alloc_amount * _BUDGET_SHIFT_CEILING_PCT
+        shift_pct_actual = _BUDGET_SHIFT_CEILING_PCT
+
+    leader_alloc_amount = _as_decimal(leader_alloc.get("allocation_amount")) or Decimal(0)
+    new_laggard_amount = laggard_alloc_amount - proposed_amount
+    new_leader_amount = leader_alloc_amount + proposed_amount
+
+    delta_cpo = laggard_cpo - leader_cpo  # > 0
+    # Predicted uplift in outcomes: (Δcpo applied to shifted spend) over
+    # current outcomes — same semantic as W37 but using the CPO frame.
+    current_outcomes = sum(
+        (Decimal(m.conversions if outcome == "conversion" else m.clicks) for m in metrics),
+        Decimal(0),
+    )
+    extra_outcomes = (proposed_amount / leader_cpo) - (proposed_amount / laggard_cpo)
+    predicted_uplift = (
+        extra_outcomes / current_outcomes if current_outcomes > 0 else Decimal(0)
+    )
     if predicted_uplift > Decimal("9.9999"):
         predicted_uplift = Decimal("9.9999")
     if predicted_uplift < Decimal(0):
@@ -206,24 +267,33 @@ async def _try_budget_shift(
     proposal = {
         "from": {
             "channel": laggard.name,
+            "channel_id": str(laggard.channel_id) if laggard.channel_id else None,
             "allocation_pct": laggard_alloc["allocation_pct"],
-            "new_allocation_pct": round(new_laggard_pct, 2),
+            "allocation_amount": str(laggard_alloc_amount),
+            "new_allocation_amount": str(new_laggard_amount.quantize(Decimal("0.01"))),
         },
         "to": {
             "channel": leader.name,
+            "channel_id": str(leader.channel_id) if leader.channel_id else None,
             "allocation_pct": leader_alloc["allocation_pct"],
-            "new_allocation_pct": round(new_leader_pct, 2),
+            "allocation_amount": str(leader_alloc_amount),
+            "new_allocation_amount": str(new_leader_amount.quantize(Decimal("0.01"))),
         },
-        "shifted_pct": round(shifted_pct, 2),
+        "proposed_amount": str(proposed_amount.quantize(Decimal("0.01"))),
+        "shift_pct": float(round(shift_pct_actual * 100, 2)),
+        "confidence": confidence,
+        "outcome": outcome,
+        "clamped_to_floor": floor_note is not None,
     }
     rationale = (
-        f"Channel '{leader.name}' clicks-per-spend is "
-        f"{leader.click_per_spend:.4f} vs '{laggard.name}' at "
-        f"{laggard.click_per_spend:.4f} over the last {MIN_DATA_DAYS} days "
-        f"({leader.click_per_spend / laggard.click_per_spend:.2f}× ratio). "
-        f"Shifting {shifted_pct:.1f}% of '{laggard.name}'s allocation to "
-        f"'{leader.name}' is projected to lift total clicks by "
-        f"{float(predicted_uplift):.2%}."
+        f"Channel '{leader.name}' cost-per-{outcome} is "
+        f"{leader_cpo:.4f} vs '{laggard.name}' at {laggard_cpo:.4f} over "
+        f"the last {MIN_DATA_DAYS} days ({ratio:.2f}× ratio, confidence: "
+        f"{confidence}). Shifting "
+        f"{proposed_amount.quantize(Decimal('0.01'))} of '{laggard.name}'s "
+        f"budget to '{leader.name}' is projected to lift total "
+        f"{outcome}s by {float(predicted_uplift):.2%}."
+        f"{floor_note or ''}"
     )
     return ProposalBundle(
         kind="budget_shift",
@@ -231,12 +301,30 @@ async def _try_budget_shift(
         rationale=rationale,
         predicted_uplift=predicted_uplift,
         supporting={
-            "leader_clicks": leader.clicks,
+            "leader_outcomes": leader.conversions if outcome == "conversion" else leader.clicks,
             "leader_spend": str(leader.spend),
-            "laggard_clicks": laggard.clicks,
+            "laggard_outcomes": laggard.conversions if outcome == "conversion" else laggard.clicks,
             "laggard_spend": str(laggard.spend),
+            "ratio": str(ratio.quantize(Decimal("0.0001"))),
         },
     )
+
+
+def _confidence_label(ratio: Decimal) -> str:
+    if ratio >= _CONFIDENCE_HIGH_RATIO:
+        return "high"
+    if ratio >= _CONFIDENCE_MEDIUM_RATIO:
+        return "medium"
+    return "low"
+
+
+def _as_decimal(v: Any) -> Decimal | None:
+    if v is None:
+        return None
+    try:
+        return Decimal(str(v))
+    except Exception:
+        return None
 
 
 # ---------------------------------------------------------------------------
@@ -291,12 +379,19 @@ async def _channel_metrics(
     for channel_id, event_type, count, metric_sum in rows:
         bucket = by_channel.setdefault(
             channel_id,
-            {"clicks": 0, "impressions": 0, "spend": Decimal(0)},
+            {
+                "clicks": 0,
+                "impressions": 0,
+                "conversions": 0,
+                "spend": Decimal(0),
+            },
         )
         if event_type == EventKind.click:
             bucket["clicks"] += int(count)
         elif event_type == EventKind.impression:
             bucket["impressions"] += int(count)
+        elif event_type == EventKind.conversion:
+            bucket["conversions"] += int(count)
         elif event_type == EventKind.spend:
             bucket["spend"] += Decimal(metric_sum or 0)
 
@@ -304,14 +399,18 @@ async def _channel_metrics(
     for channel_id, bucket in by_channel.items():
         if channel_id is None:
             continue
-        # Pull channel name lazily — small N of channels.
         from app.db.models import Channel
 
-        name = (
+        channel = (
             await session.execute(
-                select(Channel.name).where(Channel.id == channel_id)
+                select(Channel).where(Channel.id == channel_id)
             )
-        ).scalar_one_or_none() or str(channel_id)
+        ).scalar_one_or_none()
+        name = (channel.name if channel is not None else None) or str(channel_id)
+        min_daily_spend: Decimal | None = None
+        if channel is not None:
+            raw = (channel.api_config or {}).get("min_daily_spend")
+            min_daily_spend = _as_decimal(raw)
         out.append(
             ChannelMetric(
                 channel_id=channel_id,
@@ -319,6 +418,8 @@ async def _channel_metrics(
                 spend=bucket["spend"],
                 clicks=bucket["clicks"],
                 impressions=bucket["impressions"],
+                conversions=bucket["conversions"],
+                min_daily_spend=min_daily_spend,
             )
         )
     return out

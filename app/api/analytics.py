@@ -32,6 +32,7 @@ from app.db.enums import UserRole
 from app.db.models import (
     AppUser,
     Campaign,
+    CampaignChannelBudget,
     MetricAnomaly,
     OptimisationRecommendation,
 )
@@ -151,10 +152,12 @@ async def accept_recommendation(
             detail=f"recommendation is in status '{rec.status}'",
         )
 
-    # W37 ships the audit + status marker only. The actual mutation of
-    # strategy_proposal.payload (for budget_shift) is a manager-facing
-    # follow-up — the recommendation row itself plus the audit_log entry
-    # is the durable record of "operator accepted this change."
+    # W39 (E10-S05 AC #3): for budget_shift, apply the new allocations to
+    # `campaign_channel_budget` so the next dispatch wave reads the new
+    # plan. Other recommendation kinds are still marker-only.
+    if rec.kind == "budget_shift":
+        await _apply_budget_shift(db, rec=rec)
+
     rec.status = "applied"
     rec.applied_at = datetime.now(UTC)
     rec.applied_by = user.id
@@ -173,6 +176,54 @@ async def accept_recommendation(
     )
     await db.flush()
     return OptimisationRecommendationOut.model_validate(rec)
+
+
+async def _apply_budget_shift(
+    db: AsyncSession, *, rec: OptimisationRecommendation
+) -> None:
+    """E10-S05 AC #3: upsert `campaign_channel_budget` rows so the next
+    dispatch wave reads the post-shift allocation.
+
+    Idempotent — the recommendation lifecycle (only `pending → applied`)
+    prevents double-application, but the upsert is safe to re-run."""
+    from sqlalchemy.dialects.postgresql import insert as pg_insert
+
+    proposal = rec.proposal or {}
+    from_payload = proposal.get("from") or {}
+    to_payload = proposal.get("to") or {}
+    from_channel_id = from_payload.get("channel_id")
+    to_channel_id = to_payload.get("channel_id")
+    # Legacy W37 proposals (and any future kind without channel_ids) get
+    # the marker-only treatment — we still flip status to `applied` but
+    # don't touch campaign_channel_budget.
+    if not from_channel_id or not to_channel_id:
+        return
+    try:
+        from_id = UUID(from_channel_id)
+        to_id = UUID(to_channel_id)
+    except (TypeError, ValueError):
+        return
+
+    new_from = Decimal(str(from_payload.get("new_allocation_amount") or "0"))
+    new_to = Decimal(str(to_payload.get("new_allocation_amount") or "0"))
+
+    for channel_id, allocated in ((from_id, new_from), (to_id, new_to)):
+        stmt = (
+            pg_insert(CampaignChannelBudget)
+            .values(
+                campaign_id=rec.campaign_id,
+                channel_id=channel_id,
+                allocated=allocated,
+            )
+            .on_conflict_do_update(
+                index_elements=[
+                    CampaignChannelBudget.campaign_id,
+                    CampaignChannelBudget.channel_id,
+                ],
+                set_={"allocated": allocated},
+            )
+        )
+        await db.execute(stmt)
 
 
 @anomalies_router.post(

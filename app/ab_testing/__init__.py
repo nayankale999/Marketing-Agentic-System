@@ -6,5 +6,6 @@ in a sibling module added by W36.
 """
 
 from app.ab_testing.assignment import assign_variant, pick_variant_index
+from app.ab_testing.significance import EvalResult, evaluate_test
 
-__all__ = ["assign_variant", "pick_variant_index"]
+__all__ = ["assign_variant", "pick_variant_index", "evaluate_test", "EvalResult"]

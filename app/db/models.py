@@ -741,6 +741,13 @@ class AbTest(Base):
         UUID(as_uuid=True), ForeignKey("content_asset.id", ondelete="RESTRICT")
     )
     confidence: Mapped[Decimal | None] = mapped_column(Numeric(5, 4))
+    # W36 (E09-S03): latest treatment-vs-control delta on the primary
+    # metric and the timestamp of the last evaluator pass. Used to honour
+    # the 15-minute throttle without keeping state in memory.
+    lift: Mapped[Decimal | None] = mapped_column(Numeric(8, 4))
+    last_evaluated_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True)
+    )
     # W35 (E09-S01): integer percentages keyed by str(variant_id). Validated
     # at the API layer to sum to 100 across all variants in the test.
     traffic_split: Mapped[dict[str, Any]] = mapped_column(

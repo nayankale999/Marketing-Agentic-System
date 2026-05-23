@@ -351,6 +351,100 @@ async def stop_ab_test(
     return AbTestOut.model_validate(ab_test)
 
 
+@ab_tests_router.post(
+    "/{ab_test_id}/promote",
+    response_model=AbTestOut,
+)
+async def promote_ab_test(
+    ab_test_id: UUID,
+    user: AppUser = Depends(require_role(UserRole.marketer)),
+    db: AsyncSession = Depends(get_tenant_db),
+) -> AbTestOut:
+    """W36 (E09-S05): promote the winning variant.
+
+    AC #1: traffic_split flips to {winner: 100}, losers → archived.
+    AC #4: when the winner has `extra_metadata.compliance_violations`,
+    only managers + admins can promote — a marketer call returns 409 so
+    the UI can route the request to a manager for review."""
+    ab_test = await db.get(AbTest, ab_test_id)
+    if ab_test is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, detail="ab_test not found")
+    if ab_test.status != AbTestStatus.significant or ab_test.winner_id is None:
+        raise HTTPException(
+            status.HTTP_409_CONFLICT,
+            detail={
+                "reason": "no_winner",
+                "status": ab_test.status.value,
+            },
+        )
+
+    winner = await db.get(ContentAsset, ab_test.winner_id)
+    if winner is None:
+        raise HTTPException(
+            status.HTTP_409_CONFLICT,
+            detail="winner content_asset has been deleted",
+        )
+
+    # AC #4: compliance guard. A flagged winner needs manager approval.
+    flags = (winner.extra_metadata or {}).get("compliance_violations") or []
+    if flags and user.role not in {UserRole.manager, UserRole.admin}:
+        raise HTTPException(
+            status.HTTP_409_CONFLICT,
+            detail={
+                "reason": "compliance_review_required",
+                "violations": flags,
+            },
+        )
+
+    variants = await _list_variants(db, ab_test_id=ab_test_id)
+    if not variants:
+        # Fall back to the canonical pair.
+        ids = [ab_test.variant_a_id, ab_test.variant_b_id]
+        ids = [i for i in ids if i is not None]
+        variants = list(
+            (
+                await db.execute(
+                    select(ContentAsset).where(ContentAsset.id.in_(ids))
+                )
+            ).scalars().all()
+        )
+
+    prior_split = dict(ab_test.traffic_split or {})
+    for v in variants:
+        if v.id == winner.id:
+            continue
+        # AC #1: losers → archived. We don't touch the winner's status here
+        # — it stays on its natural lifecycle column. Reverting promotion
+        # (AC #3, follow-up) restores both via the audit row below.
+        if v.status not in {AssetStatus.archived, AssetStatus.published}:
+            v.status = AssetStatus.archived
+
+    ab_test.traffic_split = {str(winner.id): 100}
+
+    from app.audit.context import current_actor_id, current_actor_kind
+    from app.audit.writer import write_audit
+
+    write_audit(
+        db,
+        tenant_id=ab_test.tenant_id,
+        actor_kind=current_actor_kind.get(),
+        actor_id=current_actor_id.get(),
+        entity_kind="ab_test",
+        entity_id=ab_test.id,
+        action="ab_test_promoted",
+        before_state=None,
+        after_state=None,
+        metadata={
+            "winner_id": str(winner.id),
+            "prior_split": prior_split,
+            "compliance_violations": flags,
+        },
+    )
+
+    await db.flush()
+    return AbTestOut.model_validate(ab_test)
+
+
 async def _list_variants(
     db: AsyncSession, *, ab_test_id: UUID
 ) -> list[ContentAsset]:

@@ -10,6 +10,7 @@ from anthropic import AsyncAnthropic
 
 from app.settings.config import get_settings
 from app.tools._stubs import EchoTool, FlakyTool
+from app.tools.ab_testing import AbTestingTool
 from app.tools.base import Tool, ToolRegistry, tool_registry
 from app.tools.copywriting import CopywritingTool
 from app.tools.seo import SeoAnalysisTool
@@ -26,6 +27,7 @@ def register_builtin_tools() -> None:
     tool_registry.register(EchoTool())
     tool_registry.register(FlakyTool())
     tool_registry.register(SeoAnalysisTool())
+    tool_registry.register(AbTestingTool())
 
     settings = get_settings()
     if settings.anthropic_api_key:
@@ -38,6 +40,7 @@ def register_builtin_tools() -> None:
 
 
 __all__ = [
+    "AbTestingTool",
     "CopywritingTool",
     "EchoTool",
     "FlakyTool",

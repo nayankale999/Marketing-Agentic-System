@@ -1036,6 +1036,12 @@ class TenantComplianceSettings(Base):
     )
     postal_address: Mapped[str | None] = mapped_column(Text)
     unsubscribe_secret: Mapped[str | None] = mapped_column(String(200))
+    # W37 (E10-S02 AC #3): opt-in safety net. When True, the analytics
+    # agent flips the campaign to paused after 2 consecutive critical
+    # anomalies on the same metric.
+    auto_pause_on_critical_anomaly: Mapped[bool] = mapped_column(
+        nullable=False, server_default="false"
+    )
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )
@@ -1110,5 +1116,103 @@ class RawWebhook(Base):
         UUID(as_uuid=True), ForeignKey("analytic_event.id", ondelete="SET NULL")
     )
     received_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+
+class MetricAnomaly(Base):
+    """A flagged deviation on one campaign metric for one observation
+    window (W37, E10-S02). `sigma` records how many standard deviations
+    from the rolling-14-day median the latest value sat at. `severity`
+    is set to 'critical' for unsubscribe/bounce/spam_complaint, else
+    'warning'."""
+
+    __tablename__ = "metric_anomaly"
+    __table_args__ = (
+        CheckConstraint(
+            "severity IN ('warning', 'critical')",
+            name="ck_metric_anomaly_severity",
+        ),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, server_default=func.gen_random_uuid()
+    )
+    tenant_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("tenant.id", ondelete="CASCADE"), nullable=False
+    )
+    campaign_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("campaign.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    metric: Mapped[str] = mapped_column(String(50), nullable=False)
+    window_start: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False
+    )
+    window_end: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False
+    )
+    observed_value: Mapped[Decimal] = mapped_column(Numeric(18, 6), nullable=False)
+    baseline_median: Mapped[Decimal] = mapped_column(Numeric(18, 6), nullable=False)
+    baseline_stddev: Mapped[Decimal] = mapped_column(Numeric(18, 6), nullable=False)
+    sigma: Mapped[Decimal] = mapped_column(Numeric(8, 4), nullable=False)
+    severity: Mapped[str] = mapped_column(String(20), nullable=False)
+    dismissed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    dismissed_by: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("app_user.id", ondelete="SET NULL")
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+
+class OptimisationRecommendation(Base):
+    """One nightly-proposed change to an active campaign (W37, E10-S03).
+
+    `proposal` is JSONB so each `kind` carries its own shape — e.g.
+    a `budget_shift` proposal lands `{from: {channel_id, allocation_pct},
+    to: {channel_id, allocation_pct}, shifted_amount}`. Predicted uplift
+    is a decimal (0.0–1.0); recommendations below the configured
+    threshold (default 5%) are hidden in the default UI view but live
+    in the DB so the agent can re-evaluate them later."""
+
+    __tablename__ = "optimisation_recommendation"
+    __table_args__ = (
+        CheckConstraint(
+            "status IN ('pending', 'applied', 'rejected', 'expired')",
+            name="ck_optimisation_recommendation_status",
+        ),
+        CheckConstraint(
+            "kind IN ('budget_shift', 'creative_swap', 'schedule_change')",
+            name="ck_optimisation_recommendation_kind",
+        ),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, server_default=func.gen_random_uuid()
+    )
+    tenant_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("tenant.id", ondelete="CASCADE"), nullable=False
+    )
+    campaign_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("campaign.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    kind: Mapped[str] = mapped_column(String(50), nullable=False)
+    proposal: Mapped[dict[str, Any]] = mapped_column(
+        JSONB, nullable=False, server_default="{}"
+    )
+    rationale: Mapped[str | None] = mapped_column(Text)
+    predicted_uplift: Mapped[Decimal | None] = mapped_column(Numeric(6, 4))
+    status: Mapped[str] = mapped_column(
+        String(20), nullable=False, server_default="pending"
+    )
+    applied_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    applied_by: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("app_user.id", ondelete="SET NULL")
+    )
+    created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )

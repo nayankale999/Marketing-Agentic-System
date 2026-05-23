@@ -233,8 +233,18 @@ async def receive_webhook(
     db: AsyncSession = Depends(get_db),
     x_mas_webhook_secret: str | None = Header(default=None, alias="X-MAS-Webhook-Secret"),
 ) -> WebhookIngestResponse:
-    """Ingest provider event batches. Auth = shared secret in the
-    `X-MAS-Webhook-Secret` header matched against the credential payload."""
+    """Ingest provider event batches (W27).
+
+    DEPRECATED in favor of the uniform receiver at
+    `/webhooks/sendgrid/{tenant_id}` (W33, E12-S06). This endpoint stays
+    live so tenants already configured against it keep working; new
+    integrations should point at the W33 path. Both paths share the same
+    SendGrid event-mapping logic via `SendGridConnector.parse_webhook`,
+    so analytic_event rows are identical regardless of which receiver
+    landed them.
+
+    Auth = shared secret in `X-MAS-Webhook-Secret` header matched against
+    the credential payload."""
     # We don't depend on get_tenant_db here because the credential lookup
     # has to happen BEFORE we know the tenant context is safe to set.
     cred = (

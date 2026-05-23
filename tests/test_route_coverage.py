@@ -24,6 +24,9 @@ ALLOWLIST: set[str] = {
     # Public unsubscribe (W29, E16-S04 #2): the signed token IS the credential
     # — recipients clicking from an email footer don't have an OIDC session.
     "/api/unsubscribe/{token}",
+    # Uniform webhook receiver (W33, E12-S06): per-provider signature
+    # verification IS the credential; no OIDC session.
+    "/webhooks/{provider}/{tenant_id}",
 }
 
 

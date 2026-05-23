@@ -10,6 +10,7 @@ from starlette.middleware.sessions import SessionMiddleware
 from app.api import (
     _protected,
     ab_tests,
+    admin_unmapped_events,
     approval_settings,
     approvals,
     audiences,
@@ -32,6 +33,7 @@ from app.api import (
     strategy,
     tenant_constraints,
     unsubscribe,
+    webhooks,
 )
 from app.api.ui import approvals as ui_approvals
 from app.api.ui import campaigns as ui_campaigns
@@ -77,6 +79,8 @@ def create_app() -> FastAPI:
     application.include_router(compliance_settings.router)
     application.include_router(unsubscribe.router)
     application.include_router(provider_rate_limits.router)
+    application.include_router(webhooks.router)
+    application.include_router(admin_unmapped_events.router)
     application.include_router(tenant_constraints.router)
     application.include_router(ui_campaigns.router)
     application.include_router(ui_approvals.router)

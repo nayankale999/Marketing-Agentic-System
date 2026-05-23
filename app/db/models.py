@@ -1024,3 +1024,37 @@ class ProviderRateLimit(Base):
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )
+
+
+class RawWebhook(Base):
+    """Every inbound webhook lands here (W33, E12-S06).
+
+    Stored regardless of signature validity so the audit trail captures
+    rejections too. `mapped_event_id` is non-null when the dispatcher
+    successfully turned the payload into an `analytic_event` row; NULL
+    rows surface in the admin 'unmapped events' view.
+
+    `tenant_id` is nullable because some webhooks arrive before we can
+    resolve a tenant (misrouted, probe, deleted credential)."""
+
+    __tablename__ = "raw_webhook"
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, server_default=func.gen_random_uuid()
+    )
+    tenant_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("tenant.id", ondelete="SET NULL")
+    )
+    provider: Mapped[str] = mapped_column(String(64), nullable=False)
+    signature_valid: Mapped[bool] = mapped_column(nullable=False)
+    signature_reason: Mapped[str | None] = mapped_column(Text)
+    headers: Mapped[dict[str, Any]] = mapped_column(
+        JSONB, nullable=False, server_default="{}"
+    )
+    payload: Mapped[bytes] = mapped_column(LargeBinary, nullable=False)
+    mapped_event_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("analytic_event.id", ondelete="SET NULL")
+    )
+    received_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )

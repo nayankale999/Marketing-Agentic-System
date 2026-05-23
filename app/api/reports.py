@@ -185,12 +185,14 @@ def _report_to_csv(data: dict[str, Any]) -> str:
     order = (
         "objectives",
         "kpis_vs_target",
+        "custom_kpis",
         "channel_breakdown",
         "ab_tests",
         "anomalies",
         "recommendations_applied",
         "recommendations_rejected",
         "spend_total",
+        "spend_reconciliation",
     )
     for section in order:
         value = data.get(section)

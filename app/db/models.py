@@ -1218,6 +1218,93 @@ class OptimisationRecommendation(Base):
     )
 
 
+class CustomKpi(Base):
+    """User-defined KPI on top of analytic_event (W41, E10-S07).
+
+    `campaign_id` is nullable for tenant-wide KPIs that any campaign can
+    pick up. `formula` is a JSONB blob:
+    `{"event_type": "click", "filters": [{"path": "payload.utm_content",
+    "op": "eq", "value": "demo"}], "window_days": 7}`. `deleted_at` is
+    set on soft delete — historical report numbers stay readable per
+    E10-S07 AC #4."""
+
+    __tablename__ = "custom_kpi"
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, server_default=func.gen_random_uuid()
+    )
+    tenant_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("tenant.id", ondelete="CASCADE"), nullable=False
+    )
+    campaign_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("campaign.id", ondelete="CASCADE")
+    )
+    name: Mapped[str] = mapped_column(String(200), nullable=False)
+    formula: Mapped[dict[str, Any]] = mapped_column(
+        JSONB, nullable=False, server_default="{}"
+    )
+    deleted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    created_by: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("app_user.id", ondelete="SET NULL")
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+
+class SpendReconciliation(Base):
+    """Monthly committed-vs-invoiced spend reconciliation (W41, E10-S06).
+
+    One row per (campaign, period). `status` lifecycle:
+      `pending`  — fresh row from `run_reconciliation`, delta > 1%
+      `matched`  — fresh row from `run_reconciliation`, delta <= 1%
+      `explained` — admin reviewed + recorded a note
+      `disputed`  — admin opened a dispute item with the platform
+    AC #4 spend-read-only kicks in when status is `matched` AND campaign
+    is `completed`."""
+
+    __tablename__ = "spend_reconciliation"
+    __table_args__ = (
+        CheckConstraint(
+            "status IN ('pending', 'matched', 'explained', 'disputed')",
+            name="ck_spend_reconciliation_status",
+        ),
+        UniqueConstraint(
+            "tenant_id",
+            "campaign_id",
+            "period_start",
+            "period_end",
+            name="uq_spend_reconciliation_period",
+        ),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, server_default=func.gen_random_uuid()
+    )
+    tenant_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("tenant.id", ondelete="CASCADE"), nullable=False
+    )
+    campaign_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("campaign.id", ondelete="CASCADE"), nullable=False
+    )
+    period_start: Mapped[date] = mapped_column(Date, nullable=False)
+    period_end: Mapped[date] = mapped_column(Date, nullable=False)
+    committed_amount: Mapped[Decimal] = mapped_column(Numeric(14, 2), nullable=False)
+    invoiced_amount: Mapped[Decimal] = mapped_column(Numeric(14, 2), nullable=False)
+    delta_pct: Mapped[Decimal] = mapped_column(Numeric(8, 4), nullable=False)
+    status: Mapped[str] = mapped_column(
+        String(20), nullable=False, server_default="pending"
+    )
+    note: Mapped[str | None] = mapped_column(Text)
+    resolved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    resolved_by: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("app_user.id", ondelete="SET NULL")
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+
 class CampaignChannelBudget(Base):
     """Per-channel allocated + spent amounts for a campaign (W39, E10-S05).
 

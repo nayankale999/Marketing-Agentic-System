@@ -154,7 +154,86 @@ async def _build_data(
         "spend_total": await _spend_total(
             session, tenant_id=tenant_id, campaign_id=campaign.id
         ),
+        "custom_kpis": await _custom_kpis_section(
+            session, tenant_id=tenant_id, campaign_id=campaign.id
+        ),
+        "spend_reconciliation": await _spend_reconciliation_section(
+            session, tenant_id=tenant_id, campaign_id=campaign.id
+        ),
     }
+
+
+async def _custom_kpis_section(
+    session: AsyncSession, *, tenant_id: UUID, campaign_id: UUID
+) -> list[dict[str, Any]]:
+    """W41 (E10-S07): evaluate every active KPI scoped to this campaign
+    or tenant-wide. Deleted KPIs (`deleted_at IS NOT NULL`) are skipped
+    on snapshot — but a v1 report taken before deletion preserves the
+    value, satisfying AC #4."""
+    from datetime import UTC, datetime
+    from sqlalchemy import or_ as sa_or
+
+    from app.analytics.custom_kpis import evaluate_custom_kpi
+    from app.db.models import CustomKpi
+
+    kpis = (
+        await session.execute(
+            select(CustomKpi).where(
+                CustomKpi.tenant_id == tenant_id,
+                CustomKpi.deleted_at.is_(None),
+                sa_or(
+                    CustomKpi.campaign_id == campaign_id,
+                    CustomKpi.campaign_id.is_(None),
+                ),
+            )
+        )
+    ).scalars().all()
+    now = datetime.now(UTC)
+    out: list[dict[str, Any]] = []
+    for kpi in kpis:
+        result = await evaluate_custom_kpi(
+            session, kpi=kpi, campaign_id=campaign_id, now=now
+        )
+        out.append(
+            {
+                "id": str(kpi.id),
+                "name": kpi.name,
+                "value": result.value,
+                "missing_event": result.missing_event,
+                "message": result.message,
+            }
+        )
+    return out
+
+
+async def _spend_reconciliation_section(
+    session: AsyncSession, *, tenant_id: UUID, campaign_id: UUID
+) -> list[dict[str, Any]]:
+    from app.db.models import SpendReconciliation
+
+    rows = (
+        await session.execute(
+            select(SpendReconciliation)
+            .where(
+                SpendReconciliation.tenant_id == tenant_id,
+                SpendReconciliation.campaign_id == campaign_id,
+            )
+            .order_by(SpendReconciliation.period_end.desc())
+        )
+    ).scalars().all()
+    return [
+        {
+            "id": str(r.id),
+            "period_start": r.period_start.isoformat(),
+            "period_end": r.period_end.isoformat(),
+            "committed_amount": str(r.committed_amount),
+            "invoiced_amount": str(r.invoiced_amount),
+            "delta_pct": str(r.delta_pct),
+            "status": r.status,
+            "note": r.note,
+        }
+        for r in rows
+    ]
 
 
 def _objectives_section(campaign: Campaign) -> dict[str, Any]:

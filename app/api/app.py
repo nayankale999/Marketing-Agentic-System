@@ -22,6 +22,7 @@ from app.api import (
     compliance_rules,
     compliance_settings,
     content_assets,
+    custom_kpis,
     distribution,
     frequency_caps,
     health,
@@ -87,6 +88,7 @@ def create_app() -> FastAPI:
     application.include_router(analytics_kpis.router)
     application.include_router(analytics.anomalies_router)
     application.include_router(reports.router)
+    application.include_router(custom_kpis.router)
     application.include_router(tenant_constraints.router)
     application.include_router(ui_campaigns.router)
     application.include_router(ui_approvals.router)

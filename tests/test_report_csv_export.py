@@ -36,15 +36,20 @@ def test_csv_covers_every_section_in_stable_order() -> None:
     for s in sections:
         if s not in seen:
             seen.append(s)
+    # Missing sections (custom_kpis / spend_reconciliation in this test
+    # data) write a "(no data)" row, so they still appear in the CSV at
+    # their slot in the canonical order.
     assert seen == [
         "objectives",
         "kpis_vs_target",
+        "custom_kpis",
         "channel_breakdown",
         "ab_tests",
         "anomalies",
         "recommendations_applied",
         "recommendations_rejected",
         "spend_total",
+        "spend_reconciliation",
     ]
 
 

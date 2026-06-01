@@ -41,6 +41,7 @@ from app.api import (
 )
 from app.api.ui import approvals as ui_approvals
 from app.api.ui import campaigns as ui_campaigns
+from app.api.ui import dashboard as ui_dashboard
 from app.audit import register_listeners
 from app.observability import init_observability, tag_span_with_actor
 from app.settings.config import get_settings
@@ -90,6 +91,7 @@ def create_app() -> FastAPI:
     application.include_router(reports.router)
     application.include_router(custom_kpis.router)
     application.include_router(tenant_constraints.router)
+    application.include_router(ui_dashboard.router)
     application.include_router(ui_campaigns.router)
     application.include_router(ui_approvals.router)
 

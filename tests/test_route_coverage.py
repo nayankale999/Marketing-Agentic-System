@@ -27,6 +27,9 @@ ALLOWLIST: set[str] = {
     # Uniform webhook receiver (W33, E12-S06): per-provider signature
     # verification IS the credential; no OIDC session.
     "/webhooks/{provider}/{tenant_id}",
+    # Dev-only impersonation (W42): 404s in prod via `dev_impersonation_enabled`
+    # setting; no role needed because the guard IS the auth.
+    "/api/auth/dev-impersonate",
 }
 
 

@@ -104,3 +104,28 @@ async def callback(
 async def logout(request: Request) -> RedirectResponse:
     request.session.clear()
     return RedirectResponse(url="/")
+
+
+@router.get("/dev-impersonate", include_in_schema=False)
+async def dev_impersonate(
+    request: Request,
+    email: str,
+    db: AsyncSession = Depends(get_db),
+) -> RedirectResponse:
+    """Dev-only: sets a session cookie for the user with the given email
+    without going through OIDC. Useful for browser walkthroughs when the
+    OIDC mock config has drift. Guarded by `DEV_IMPERSONATION_ENABLED`
+    so it can't slip into a non-dev deployment."""
+    if not get_settings().dev_impersonation_enabled:
+        raise HTTPException(status.HTTP_404_NOT_FOUND)
+    user = (
+        await db.execute(select(AppUser).where(AppUser.email == email))
+    ).scalar_one_or_none()
+    if user is None:
+        raise HTTPException(
+            status.HTTP_404_NOT_FOUND,
+            detail=f"no user with email '{email}'",
+        )
+    request.session["user_id"] = str(user.id)
+    request.session["tenant_id"] = str(user.tenant_id)
+    return RedirectResponse(url="/api/me")

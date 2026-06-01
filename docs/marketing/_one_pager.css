@@ -1,0 +1,118 @@
+/* MAS one-pager — print stylesheet */
+
+@page {
+  size: A4;
+  margin: 11mm 13mm 11mm 13mm;
+}
+
+* { box-sizing: border-box; }
+
+body {
+  font-family: "Helvetica Neue", Helvetica, Arial, sans-serif;
+  font-size: 8.5pt;
+  line-height: 1.3;
+  color: #1a1a1a;
+  margin: 0;
+}
+
+/* The title is the H1 at the very top. We make it the brand banner. */
+h1:first-of-type {
+  font-size: 17pt;
+  margin: 0 0 2pt 0;
+  color: #0c2340;
+  letter-spacing: -0.5px;
+}
+
+h1 + p strong {
+  display: block;
+  font-size: 9pt;
+  font-weight: 500;
+  color: #2c3e50;
+  margin-bottom: 7pt;
+  border-bottom: 2px solid #0c2340;
+  padding-bottom: 4pt;
+}
+
+h2 {
+  font-size: 9.5pt;
+  color: #0c2340;
+  margin: 6pt 0 2pt 0;
+  text-transform: uppercase;
+  letter-spacing: 0.4px;
+  font-weight: 600;
+}
+
+h3 {
+  font-size: 9pt;
+  color: #0c2340;
+  margin: 5pt 0 1pt 0;
+}
+
+p, ul, ol {
+  margin: 0 0 3pt 0;
+}
+
+ul, ol {
+  padding-left: 13pt;
+}
+
+li {
+  margin-bottom: 0.5pt;
+}
+
+strong {
+  color: #0c2340;
+}
+
+hr {
+  border: none;
+  border-top: 1px solid #d0d7de;
+  margin: 5pt 0;
+}
+
+/* Tables — the value-prop + agent tables */
+table {
+  width: 100%;
+  border-collapse: collapse;
+  margin: 3pt 0 5pt 0;
+  font-size: 8pt;
+}
+
+thead {
+  background: #0c2340;
+  color: #ffffff;
+}
+
+th, td {
+  text-align: left;
+  padding: 3pt 5pt;
+  border: 1px solid #d0d7de;
+  vertical-align: top;
+}
+
+thead th {
+  border-color: #0c2340;
+  font-weight: 600;
+}
+
+tbody tr:nth-child(even) {
+  background: #f6f8fa;
+}
+
+code {
+  font-family: "SF Mono", Menlo, monospace;
+  font-size: 9pt;
+  background: #f6f8fa;
+  padding: 1pt 3pt;
+  border-radius: 2pt;
+}
+
+a {
+  color: #0c63ce;
+  text-decoration: none;
+}
+
+/* Hide the auto-generated title block from pandoc */
+header#title-block-header {
+  display: none;
+}

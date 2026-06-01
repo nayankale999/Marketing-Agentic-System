@@ -1382,3 +1382,36 @@ class CampaignReport(Base):
         JSONB, nullable=False, server_default="{}"
     )
     is_latest: Mapped[bool] = mapped_column(nullable=False, server_default="false")
+
+
+class AssistantConversation(Base):
+    """Per-user dashboard assistant memory (W42.1).
+
+    One row per user, holds the rolling message list passed to Claude.
+    Application layer trims to the last N entries to bound input token
+    cost (`app.assistant.memory.MAX_MESSAGES`)."""
+
+    __tablename__ = "assistant_conversation"
+
+    user_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("app_user.id", ondelete="CASCADE"),
+        primary_key=True,
+    )
+    tenant_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("tenant.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    messages: Mapped[list[dict[str, Any]]] = mapped_column(
+        JSONB, nullable=False, server_default="[]"
+    )
+    # W42.3: persistent campaign focus that outlives the message trim.
+    # When user says "approve it" / "launch it" / "what's next" without
+    # naming a campaign, the assistant uses this to resolve "it".
+    active_campaign_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("campaign.id", ondelete="SET NULL")
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )

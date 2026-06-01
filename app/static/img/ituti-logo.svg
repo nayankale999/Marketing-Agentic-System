@@ -1,0 +1,40 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- ITUTI loading indicator — the dot on top of the 'i' radiates like a
+     beacon. Concentric circles cascade outward at staggered intervals.
+     Animation runs as long as the SVG is in the DOM. -->
+<svg xmlns="http://www.w3.org/2000/svg"
+     viewBox="0 0 64 64"
+     width="40"
+     height="40"
+     role="img"
+     aria-label="Working">
+  <style>
+    .ituti-ring {
+      fill: none;
+      stroke: #2c6ecb;
+      stroke-width: 2;
+      transform-origin: 32px 18px;
+      transform-box: fill-box;
+      animation: ituti-pulse 1.6s ease-out infinite;
+      opacity: 0;
+    }
+    .ituti-ring--a { animation-delay: 0s; }
+    .ituti-ring--b { animation-delay: 0.4s; }
+    .ituti-ring--c { animation-delay: 0.8s; }
+
+    @keyframes ituti-pulse {
+      0%   { transform: scale(0.2); opacity: 0.9; }
+      80%  { transform: scale(2.8); opacity: 0; }
+      100% { transform: scale(2.8); opacity: 0; }
+    }
+  </style>
+
+  <!-- Beacon rings, emanating from the 'i' dot. -->
+  <circle class="ituti-ring ituti-ring--a" cx="32" cy="18" r="6"/>
+  <circle class="ituti-ring ituti-ring--b" cx="32" cy="18" r="6"/>
+  <circle class="ituti-ring ituti-ring--c" cx="32" cy="18" r="6"/>
+
+  <!-- The 'i' itself. Dot stays solid; rings move around it. -->
+  <circle cx="32" cy="18" r="4.5" fill="#0c2340"/>
+  <rect   x="29.25" y="26" width="5.5" height="26" rx="1.25" fill="#0c2340"/>
+</svg>

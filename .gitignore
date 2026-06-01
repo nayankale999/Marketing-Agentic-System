@@ -23,3 +23,6 @@ build/
 .idea/
 .vscode/
 *.swp
+
+# Office app lock/temp files
+~$*

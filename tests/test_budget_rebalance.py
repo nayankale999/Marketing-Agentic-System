@@ -191,10 +191,16 @@ async def _seed_world(
 
 
 async def test_5_day_age_gate_unblocks_proposal(db_engine: AsyncEngine) -> None:
-    """4 days → no proposal; 5 days → proposal fires (when data supports it)."""
+    """Below floor → no proposal; comfortably above → proposal fires.
+
+    We don't probe the exact 5-day boundary because `date.today()`
+    returns the local date and the rule's age check uses UTC datetimes;
+    at the boundary, a non-UTC timezone could shave hours off and flip
+    the result. The contract is the gate exists, not its exact UTC second.
+    """
     assert MIN_DATA_DAYS == 5
 
-    early = await _seed_world(db_engine, campaign_age_days=4)
+    early = await _seed_world(db_engine, campaign_age_days=3)
     async with AsyncSession(db_engine, expire_on_commit=False) as session, session.begin():
         recs = await generate_recommendations(
             session,
@@ -204,7 +210,7 @@ async def test_5_day_age_gate_unblocks_proposal(db_engine: AsyncEngine) -> None:
         )
     assert recs == []
 
-    ready = await _seed_world(db_engine, campaign_age_days=5)
+    ready = await _seed_world(db_engine, campaign_age_days=7)
     async with AsyncSession(db_engine, expire_on_commit=False) as session, session.begin():
         recs = await generate_recommendations(
             session,

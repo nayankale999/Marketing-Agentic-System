@@ -58,7 +58,7 @@ services:
               "requestMappings": [
                 {
                   "requestParam": "scope",
-                  "match": "openid",
+                  "match": ".*openid.*",
                   "claims": {
                     "sub": "demo-marketer-001",
                     "email": "marketer@acme.test",

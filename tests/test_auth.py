@@ -81,3 +81,27 @@ def test_manager_passes_marketer_endpoint(
     client = signed_in(UserRole.manager)
     response = client.get("/api/_protected/marketer")
     assert response.status_code == 200
+
+
+# W41+ — dev-only impersonation guard.
+
+def test_dev_impersonation_404_when_disabled(monkeypatch) -> None:
+    """Default config has the impersonation flag off; the endpoint must
+    return 404 to avoid leaking its existence in production builds."""
+    from app.settings.config import get_settings
+
+    get_settings.cache_clear()
+    client = TestClient(app)
+    resp = client.get(
+        "/api/auth/dev-impersonate", params={"email": "anyone@acme.test"}
+    )
+    assert resp.status_code == 404
+
+
+def test_dev_impersonation_setting_default_is_false() -> None:
+    """The impersonation flag MUST default to False — production builds
+    don't need to explicitly turn it off."""
+    from app.settings.config import Settings
+
+    s = Settings(_env_file=None)
+    assert s.dev_impersonation_enabled is False

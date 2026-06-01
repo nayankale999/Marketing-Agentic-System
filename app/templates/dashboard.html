@@ -1,0 +1,232 @@
+{% extends "base.html" %}
+{% from "_macros.html" import status_badge, section_heading, empty_state %}
+
+{% block title %}MAS — Dashboard{% endblock %}
+
+{% block content %}
+  <header class="stack">
+    <h1>Dashboard</h1>
+    <div class="muted small">Signed in as {{ current_user.display_name or current_user.email }} ({{ current_user.role.value }})</div>
+  </header>
+
+  <!-- ───────── Stats cards ───────── -->
+  <section class="stat-grid">
+    <div class="stat-card">
+      <div class="stat-card__label">Campaigns</div>
+      <div class="stat-card__value">{{ stats.total_campaigns }}</div>
+      <div class="stat-card__sub">
+        {% set live = stats.campaigns_by_status.get("live", 0) %}
+        {% set paused = stats.campaigns_by_status.get("paused", 0) %}
+        {% set completed = stats.campaigns_by_status.get("completed", 0) %}
+        {% if live %}<span class="badge live">{{ live }} live</span>{% endif %}
+        {% if paused %}<span class="badge warn">{{ paused }} paused</span>{% endif %}
+        {% if completed %}<span class="badge">{{ completed }} completed</span>{% endif %}
+      </div>
+    </div>
+
+    <div class="stat-card">
+      <div class="stat-card__label">Pending approvals</div>
+      <div class="stat-card__value">{{ stats.pending_approvals }}</div>
+      <div class="stat-card__sub">
+        <a href="/ui/approvals/queue" class="muted small">Open queue →</a>
+      </div>
+    </div>
+
+    <div class="stat-card">
+      <div class="stat-card__label">Open anomalies</div>
+      <div class="stat-card__value {{ 'danger' if stats.critical_anomalies > 0 else '' }}">
+        {{ stats.open_anomalies }}
+      </div>
+      <div class="stat-card__sub">
+        {% if stats.critical_anomalies > 0 %}
+          <span class="badge danger">{{ stats.critical_anomalies }} critical</span>
+        {% else %}
+          <span class="muted small">no critical alerts</span>
+        {% endif %}
+      </div>
+    </div>
+
+    <div class="stat-card">
+      <div class="stat-card__label">Recommendations</div>
+      <div class="stat-card__value">{{ stats.pending_recommendations }}</div>
+      <div class="stat-card__sub muted small">
+        {% if stats.pending_recommendations %}pending decision{% else %}none open{% endif %}
+      </div>
+    </div>
+  </section>
+
+  <!-- ───────── Assistant ───────── -->
+  <section class="card assistant">
+    <div class="cluster" style="justify-content: space-between; align-items: center;">
+      {{ section_heading("Tell MAS what to do…", "assistant") }}
+      <div class="cluster" style="gap: 12px; align-items: center;">
+        {% if active_campaign %}
+          <a href="/ui/campaigns/{{ active_campaign.id }}"
+             class="active-campaign-pill"
+             title="The campaign the assistant is currently working with. Click to open the campaign page.">
+            <span class="active-campaign-pill__dot"></span>
+            <span class="active-campaign-pill__label">In focus:</span>
+            <span class="active-campaign-pill__name">{{ active_campaign.name }}</span>
+            {{ status_badge(active_campaign.status.value) }}
+          </a>
+        {% else %}
+          <span class="muted small" title="No campaign is currently in focus. Mention one in chat or open one from the list below.">
+            No campaign in focus
+          </span>
+        {% endif %}
+        <button type="button"
+                class="button button--link"
+                hx-post="/ui/assistant/clear"
+                hx-target="#assistant-thread"
+                hx-swap="innerHTML"
+                title="Wipe the assistant's memory of this conversation">
+          Start over
+        </button>
+      </div>
+    </div>
+
+    <!-- Conversation thread — server-rendered on load, appended via HTMX after.
+         `hx-indicator` here propagates to every chip inside (HTMX inherits
+         attributes down the DOM), so confirmation chips + row-action chips +
+         next-step chips all toggle the loader without needing the attribute
+         repeated on every button. -->
+    <div id="assistant-thread"
+         class="assistant__thread"
+         hx-indicator="#assistant-loading">
+      {% for entry in thread %}
+        <div class="assistant__bubble assistant__bubble--{{ entry.role }}">
+          {% if entry.role == "user" %}
+            <strong>You:</strong> {{ entry.text }}
+          {% elif entry.role == "assistant" %}
+            {% if entry.tool_name %}
+              <span class="muted small">Used <code>{{ entry.tool_name }}</code></span>
+              {% if entry.text %}<br>{% endif %}
+            {% endif %}
+            {{ entry.text }}
+          {% elif entry.role == "tool" %}
+            <span class="muted small">Tool result: {{ entry.text }}</span>
+          {% endif %}
+        </div>
+      {% endfor %}
+    </div>
+
+    <form id="assistant-form"
+          hx-post="/ui/assistant/chat"
+          hx-target="#assistant-thread"
+          hx-swap="beforeend"
+          hx-indicator="#assistant-loading"
+          hx-on::after-request="this.reset(); document.getElementById('assistant-thread').scrollTop = 99999;">
+      <textarea
+        id="assistant-input"
+        name="message"
+        placeholder="e.g. 'Show me my live campaigns' · 'Pause Q3 launch' · 'Create a campaign for Q4 demand gen, $25k budget over 6 weeks, primary KPI 100 demos, audience is manufacturing CTOs in NA…'"
+        rows="3"
+        required></textarea>
+      <div class="assistant__row">
+        <div id="assistant-loading" class="assistant__loading htmx-indicator">
+          <img src="/static/img/ituti-logo.svg"
+               alt=""
+               class="assistant__loading-logo">
+          <span id="assistant-loading-text">Thinking…</span>
+        </div>
+        <button type="submit" class="button button--primary">Send ⌘↵</button>
+      </div>
+    </form>
+  </section>
+
+  <script>
+    // Contextual loading label — derives from the message the user is
+    // about to submit (keyword match). Updates the visible loader text
+    // before HTMX fires so the user sees "Drafting copy…" not "Thinking…"
+    // when waiting on the Content Creator.
+    (function() {
+      const LOADING_HINTS = [
+        [/\bcreate\b.*campaign|new campaign/i, "Creating campaign…"],
+        [/strategy|strategist/i, "Asking the Strategist (live LLM)…"],
+        [/draft|content|copy/i, "Drafting content (live LLM)…"],
+        [/approve.*content|approve all/i, "Approving drafts…"],
+        [/launch/i, "Launching campaign…"],
+        [/pause|stop/i, "Pausing campaign…"],
+        [/resume/i, "Resuming campaign…"],
+        [/anomal/i, "Scanning anomalies…"],
+        [/recommend/i, "Computing recommendations…"],
+        [/report|how.*doing|kpi/i, "Rolling up KPIs…"],
+        [/audience|csv|contacts/i, "Materialising audience…"],
+        [/yes,?\s*confirm/i, "Confirming…"],
+      ];
+
+      function pickLabel(text) {
+        const t = (text || "").toLowerCase();
+        for (const [re, label] of LOADING_HINTS) {
+          if (re.test(t)) return label;
+        }
+        return "Thinking…";
+      }
+
+      const loadingText = document.getElementById("assistant-loading-text");
+      const input = document.getElementById("assistant-input");
+
+      // 1) Update label on form submit (typed messages).
+      document.getElementById("assistant-form")
+        .addEventListener("submit", () => {
+          loadingText.textContent = pickLabel(input.value);
+        });
+
+      // 2) Update label on chip clicks — HTMX fires htmx:beforeRequest on
+      //    every assistant chip in the thread; read the hx-vals payload.
+      document.body.addEventListener("htmx:beforeRequest", (evt) => {
+        const target = evt.detail.elt;
+        if (target && target.matches && target.matches("[hx-post='/ui/assistant/chat']")) {
+          let msg = "";
+          try {
+            const vals = target.getAttribute("hx-vals");
+            if (vals) msg = (JSON.parse(vals) || {}).message || "";
+          } catch (e) { /* ignore parse errors */ }
+          loadingText.textContent = pickLabel(msg);
+        }
+      });
+
+      // ⌘↵ / Ctrl+↵ submits.
+      input.addEventListener("keydown", (e) => {
+        if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) {
+          e.preventDefault();
+          document.getElementById("assistant-form").requestSubmit();
+        }
+      });
+    })();
+  </script>
+
+  <!-- ───────── Recent campaigns ───────── -->
+  <section class="card">
+    {{ section_heading("Recent campaigns", "recent") }}
+    {% if stats.recent_campaigns %}
+      <table class="data-table">
+        <thead>
+          <tr>
+            <th>Name</th>
+            <th>Status</th>
+            <th>Start</th>
+            <th>End</th>
+            <th>Budget</th>
+            <th></th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for c in stats.recent_campaigns %}
+            <tr>
+              <td>{{ c.name }}</td>
+              <td>{{ status_badge(c.status) }}</td>
+              <td>{{ c.start_date }}</td>
+              <td>{{ c.end_date }}</td>
+              <td>{{ c.budget_total }} {{ c.currency }}</td>
+              <td><a href="/ui/campaigns/{{ c.id }}">Open →</a></td>
+            </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    {% else %}
+      {{ empty_state("No campaigns yet. Ask the assistant above to create one.") }}
+    {% endif %}
+  </section>
+
+{% endblock %}

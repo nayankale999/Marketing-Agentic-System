@@ -408,11 +408,18 @@ def test_tool_registers_when_anthropic_api_key_is_set(monkeypatch: pytest.Monkey
 
 
 def test_tool_skipped_when_no_anthropic_api_key(monkeypatch: pytest.MonkeyPatch) -> None:
-    from app.settings.config import get_settings
+    from app.settings.config import Settings, get_settings
     from app.tools import base as tools_base
     from app.tools import register_builtin_tools
 
     monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    # `.env.local` may have the key set during dev work — bypass file
+    # loading entirely so this test stays deterministic. We patch both
+    # the canonical reference and the one app.tools imported at module
+    # load time.
+    fake = lambda: Settings(_env_file=None, anthropic_api_key="")
+    monkeypatch.setattr("app.settings.config.get_settings", fake)
+    monkeypatch.setattr("app.tools.get_settings", fake)
     get_settings.cache_clear()
 
     import app.tools as tools_pkg

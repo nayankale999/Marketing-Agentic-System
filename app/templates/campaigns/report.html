@@ -29,7 +29,25 @@
   </header>
 
   {% if not report %}
-    {{ empty_state("Generate a report via POST /api/campaigns/" ~ campaign.id ~ "/reports.") }}
+    <div class="card">
+      <p>No report has been generated yet for this campaign.</p>
+      <button type="button"
+              class="button button--primary"
+              hx-post="/api/campaigns/{{ campaign.id }}/reports"
+              hx-swap="none"
+              hx-on::after-request="window.location.reload()"
+              hx-indicator="#report-gen-indicator">
+        Generate report now
+      </button>
+      <span id="report-gen-indicator" class="muted small htmx-indicator" style="margin-left: 12px;">
+        Generating…
+      </span>
+      <p class="muted small" style="margin-top: 12px;">
+        The report aggregates objectives, KPIs, channel breakdown,
+        A/B tests, anomalies, recommendations, custom KPIs, and spend
+        reconciliation into a single versioned snapshot.
+      </p>
+    </div>
   {% else %}
     {% set d = report.data %}
 

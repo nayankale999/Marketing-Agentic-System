@@ -1,0 +1,376 @@
+{# Partial appended to #assistant-thread by HTMX. Holds the latest
+   user message + the assistant's reply + action affordances. #}
+{% from "_macros.html" import status_badge %}
+
+{# 1. User's message bubble #}
+<div class="assistant__bubble assistant__bubble--user">
+  <strong>You:</strong> {{ user_message }}
+</div>
+
+{# 2. Assistant's reply bubble #}
+<div class="assistant__bubble assistant__bubble--assistant">
+  {% if result.error %}
+    <strong class="danger">Error.</strong> {{ result.error }}
+
+  {% else %}
+    {% if result.tool_name %}
+      <div class="muted small">Used <code>{{ result.tool_name }}</code></div>
+    {% endif %}
+
+    {% if result.text %}
+      <p>{{ result.text }}</p>
+    {% elif result.tool_summary %}
+      <p>{{ result.tool_summary }}</p>
+    {% endif %}
+
+    {% set d = result.tool_data %}
+
+    {# ─── CHOICES (from request_input tool) ─── #}
+    {% if d.choices %}
+      {% if d.context %}<p class="muted small">{{ d.context }}</p>{% endif %}
+      <div class="cluster" style="margin: 6px 0 4px 0;">
+        {% for opt in d.choices %}
+          <button type="button"
+                  class="chip chip--primary"
+                  hx-post="/ui/assistant/chat"
+                  hx-target="#assistant-thread"
+                  hx-swap="beforeend"
+                  hx-vals='{"message": {{ opt.value | tojson }}}'>
+            {{ opt.label }}
+          </button>
+        {% endfor %}
+      </div>
+    {% endif %}
+
+    {# ─── CAMPAIGNS ─── #}
+    {% if d.campaigns %}
+      <table class="data-table">
+        <thead><tr><th>Name</th><th>Status</th><th>Dates</th><th>Budget</th><th></th></tr></thead>
+        <tbody>
+          {% for c in d.campaigns %}
+            <tr>
+              <td>{{ c.name }}</td>
+              <td>{{ status_badge(c.status) }}</td>
+              <td class="muted small">{{ c.start_date }} → {{ c.end_date }}</td>
+              <td>{{ c.budget }}</td>
+              <td class="cluster">
+                <button type="button" class="chip"
+                        hx-post="/ui/assistant/chat"
+                        hx-target="#assistant-thread"
+                        hx-swap="beforeend"
+                        hx-vals='{"message": "How is {{ c.name }} doing?"}'>KPIs</button>
+                {% if c.status == "live" or c.status == "optimising" %}
+                  <button type="button" class="chip chip--warn"
+                          hx-post="/ui/assistant/chat"
+                          hx-target="#assistant-thread"
+                          hx-swap="beforeend"
+                          hx-vals='{"message": "Pause {{ c.name }}"}'>Pause</button>
+                {% elif c.status == "paused" %}
+                  <button type="button" class="chip"
+                          hx-post="/ui/assistant/chat"
+                          hx-target="#assistant-thread"
+                          hx-swap="beforeend"
+                          hx-vals='{"message": "Resume {{ c.name }}"}'>Resume</button>
+                {% endif %}
+                <a class="chip" href="/ui/campaigns/{{ c.id }}">Open ↗</a>
+              </td>
+            </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    {% endif %}
+
+    {# ─── ANOMALIES ─── #}
+    {% if d.anomalies %}
+      <table class="data-table">
+        <thead><tr><th>Metric</th><th>Severity</th><th>σ</th><th>Observed</th><th>Median</th><th></th></tr></thead>
+        <tbody>
+          {% for a in d.anomalies %}
+            <tr>
+              <td>{{ a.metric }}</td>
+              <td>{{ a.severity }}</td>
+              <td>{{ a.sigma }}</td>
+              <td>{{ a.observed }}</td>
+              <td>{{ a.baseline_median }}</td>
+              <td>
+                <button type="button" class="chip"
+                        hx-post="/ui/assistant/chat"
+                        hx-target="#assistant-thread"
+                        hx-swap="beforeend"
+                        hx-vals='{"message": "Dismiss anomaly {{ a.id }}"}'>Dismiss</button>
+              </td>
+            </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    {% endif %}
+
+    {# ─── RECOMMENDATIONS ─── #}
+    {% if d.recommendations %}
+      <ul>
+        {% for r in d.recommendations %}
+          <li>
+            <strong>{{ r.kind }}</strong>
+            {% if r.predicted_uplift %}<span class="muted small">(uplift {{ r.predicted_uplift }})</span>{% endif %}
+            — {{ r.rationale }}
+            <div class="cluster" style="margin-top:4px;">
+              <button type="button" class="chip chip--primary"
+                      hx-post="/ui/assistant/chat"
+                      hx-target="#assistant-thread"
+                      hx-swap="beforeend"
+                      hx-vals='{"message": "Accept recommendation {{ r.id }}"}'>Accept</button>
+            </div>
+          </li>
+        {% endfor %}
+      </ul>
+    {% endif %}
+
+    {# ─── DRAFTS FOR REVIEW (one-at-a-time review flow) ─── #}
+    {% if d.drafts %}
+      <div class="drafts-review">
+        {% for draft in d.drafts %}
+          <div class="draft-card">
+            <div class="draft-card__head">
+              <strong>{{ draft.title }}</strong>
+              <span class="muted small">· {{ draft.asset_type }} · {{ draft.status }}</span>
+            </div>
+            {% if draft.compliance_flags %}
+              <div class="draft-card__flags">
+                {% for f in draft.compliance_flags %}
+                  <span class="chip chip--danger">{{ f.rule or f.keyword or "flag" }} ({{ f.severity or "warning" }})</span>
+                {% endfor %}
+              </div>
+            {% endif %}
+            <p class="draft-card__preview">{{ draft.preview or "(empty body)" }}</p>
+            <div class="cluster">
+              <button type="button" class="chip chip--primary"
+                      hx-post="/ui/assistant/chat"
+                      hx-target="#assistant-thread" hx-swap="beforeend"
+                      hx-vals='{"message": "Approve asset {{ draft.id }}"}'>
+                Approve
+              </button>
+              <button type="button" class="chip chip--warn"
+                      hx-post="/ui/assistant/chat"
+                      hx-target="#assistant-thread" hx-swap="beforeend"
+                      hx-vals='{"message": "Reject asset {{ draft.id }} — needs revision"}'>
+                Reject
+              </button>
+              <a class="chip" href="/ui/approvals/{{ draft.id }}">Open in UI ↗</a>
+            </div>
+          </div>
+        {% endfor %}
+
+        <div class="cluster" style="margin-top: 10px;">
+          <span class="muted small">Or:</span>
+          <button type="button" class="chip"
+                  hx-post="/ui/assistant/chat"
+                  hx-target="#assistant-thread" hx-swap="beforeend"
+                  hx-vals='{"message": "Approve all the drafts at once"}'>
+            Approve all
+          </button>
+        </div>
+      </div>
+    {% endif %}
+
+    {# ─── APPROVALS ─── #}
+    {% if d.approvals %}
+      <table class="data-table">
+        <thead><tr><th>Asset</th><th>Type</th><th></th></tr></thead>
+        <tbody>
+          {% for a in d.approvals %}
+            <tr>
+              <td>{{ a.title }}</td>
+              <td>{{ a.asset_type }}</td>
+              <td><a class="chip" href="{{ a.review_link }}">Review ↗</a></td>
+            </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    {% endif %}
+
+    {# ─── KPIs ─── #}
+    {% if d.kpis %}
+      <div class="grid-2">
+        <div><strong>Opens:</strong> {{ d.kpis.opens }}</div>
+        <div><strong>Clicks:</strong> {{ d.kpis.clicks }}</div>
+        <div><strong>Conversions:</strong> {{ d.kpis.conversions }}</div>
+        <div><strong>Spend:</strong> {{ d.kpis.spend }}</div>
+      </div>
+      {% if d.link %}<a class="chip" href="{{ d.link }}">Open campaign ↗</a>{% endif %}
+    {% endif %}
+
+    {% if d.link and not d.kpis and not d.campaigns %}
+      <p><a class="chip" href="{{ d.link }}">Open in the UI ↗</a></p>
+    {% endif %}
+
+    {# ─── Confirmation buttons for destructive tools ─── #}
+    {# request_input renders its own choice chips above; skip the generic
+       Yes/Cancel pair to avoid duplication. #}
+    {% if result.requires_confirmation and not d.choices %}
+      <div class="assistant__confirm">
+        <p class="muted small">This action needs an explicit confirmation.</p>
+        <div class="cluster">
+          <button type="button" class="chip chip--danger"
+                  hx-post="/ui/assistant/chat"
+                  hx-target="#assistant-thread"
+                  hx-swap="beforeend"
+                  hx-vals='{"message": "yes, confirm"}'>Yes, confirm</button>
+          <button type="button" class="chip"
+                  hx-post="/ui/assistant/chat"
+                  hx-target="#assistant-thread"
+                  hx-swap="beforeend"
+                  hx-vals='{"message": "no, cancel"}'>Cancel</button>
+        </div>
+      </div>
+    {% endif %}
+
+    {# ─── "What now?" chips after a successful read-tool run ─── #}
+    {% if result.tool_name in ("list_campaigns", "get_campaign", "summarise_kpis") and not result.requires_confirmation %}
+      <div class="cluster" style="margin-top: 10px;">
+        <button type="button" class="chip"
+                hx-post="/ui/assistant/chat"
+                hx-target="#assistant-thread"
+                hx-swap="beforeend"
+                hx-vals='{"message": "Show me any anomalies"}'>Show anomalies</button>
+        <button type="button" class="chip"
+                hx-post="/ui/assistant/chat"
+                hx-target="#assistant-thread"
+                hx-swap="beforeend"
+                hx-vals='{"message": "Any recommendations I should look at?"}'>Show recommendations</button>
+        <button type="button" class="chip"
+                hx-post="/ui/assistant/chat"
+                hx-target="#assistant-thread"
+                hx-swap="beforeend"
+                hx-vals="{&quot;message&quot;: &quot;What's waiting on me to approve?&quot;}">Pending approvals</button>
+      </div>
+    {% endif %}
+
+    {# ─── Deterministic next-step chips on the campaign creation flow ─── #}
+    {# These render regardless of whether the model thinks to call request_input,
+       so the conversation can't stall mid-flow. The user clicks the chip;
+       the assistant picks up the message and runs the next tool. #}
+    {% if result.tool_name == "create_campaign" and not result.requires_confirmation and d.campaign_id %}
+      <div class="cluster" style="margin-top: 10px;">
+        <span class="muted small">Next:</span>
+        <button type="button" class="chip chip--primary"
+                hx-post="/ui/assistant/chat" hx-target="#assistant-thread" hx-swap="beforeend"
+                hx-vals='{"message": "Build a synthetic audience of 20 contacts for that campaign"}'>
+          Build synthetic audience (20 contacts)
+        </button>
+      </div>
+    {% endif %}
+
+    {% if result.tool_name == "synthesise_audience" and not result.requires_confirmation and d.campaign_id %}
+      <div class="cluster" style="margin-top: 10px;">
+        <span class="muted small">Next:</span>
+        <button type="button" class="chip chip--primary"
+                hx-post="/ui/assistant/chat" hx-target="#assistant-thread" hx-swap="beforeend"
+                hx-vals='{"message": "Run the Strategist now"}'>
+          Draft strategy with the Strategist
+        </button>
+      </div>
+    {% endif %}
+
+    {% if result.tool_name == "generate_strategy" and not result.requires_confirmation and d.proposal_id %}
+      <div class="cluster" style="margin-top: 10px;">
+        <span class="muted small">Next:</span>
+        <button type="button" class="chip chip--primary"
+                hx-post="/ui/assistant/chat" hx-target="#assistant-thread" hx-swap="beforeend"
+                hx-vals='{"message": "Accept this strategy"}'>
+          Accept strategy
+        </button>
+        <button type="button" class="chip"
+                hx-post="/ui/assistant/chat" hx-target="#assistant-thread" hx-swap="beforeend"
+                hx-vals='{"message": "Regenerate the strategy with a different angle"}'>
+          Regenerate
+        </button>
+      </div>
+    {% endif %}
+
+    {% if result.tool_name == "accept_strategy" and not result.requires_confirmation and d.campaign_id %}
+      <div class="cluster" style="margin-top: 10px;">
+        <span class="muted small">Next:</span>
+        <button type="button" class="chip chip--primary"
+                hx-post="/ui/assistant/chat" hx-target="#assistant-thread" hx-swap="beforeend"
+                hx-vals='{"message": "Draft the content for every touchpoint"}'>
+          Draft content
+        </button>
+      </div>
+    {% endif %}
+
+    {% if result.tool_name == "generate_content" and not result.requires_confirmation and d.campaign_id %}
+      <div class="cluster" style="margin-top: 10px;">
+        <span class="muted small">Next:</span>
+        <button type="button" class="chip chip--primary"
+                hx-post="/ui/assistant/chat" hx-target="#assistant-thread" hx-swap="beforeend"
+                hx-vals='{"message": "Approve all the drafts"}'>
+          Approve all drafts
+        </button>
+      </div>
+    {% endif %}
+
+    {% if result.tool_name == "approve_all_content" and not result.requires_confirmation and d.campaign_id %}
+      <div class="cluster" style="margin-top: 10px;">
+        <span class="muted small">Next:</span>
+        <button type="button" class="chip chip--primary"
+                hx-post="/ui/assistant/chat" hx-target="#assistant-thread" hx-swap="beforeend"
+                hx-vals='{"message": "Launch the campaign"}'>
+          Launch campaign
+        </button>
+      </div>
+    {% endif %}
+
+    {% if result.tool_name == "launch_campaign" and not result.requires_confirmation and d.link %}
+      <div class="cluster" style="margin-top: 10px;">
+        <a class="chip chip--primary" href="{{ d.link }}">View live campaign ↗</a>
+        <a class="chip" href="{{ d.link }}/report">Open report ↗</a>
+      </div>
+    {% endif %}
+
+    {# ─── W42.3: post-action chips for the review workflow ─── #}
+    {% if result.tool_name == "approve_asset" and not result.requires_confirmation %}
+      <div class="cluster" style="margin-top: 10px;">
+        <span class="muted small">Next:</span>
+        <button type="button" class="chip chip--primary"
+                hx-post="/ui/assistant/chat" hx-target="#assistant-thread" hx-swap="beforeend"
+                hx-vals='{"message": "Show me the remaining drafts to review"}'>
+          Continue reviewing
+        </button>
+        <button type="button" class="chip"
+                hx-post="/ui/assistant/chat" hx-target="#assistant-thread" hx-swap="beforeend"
+                hx-vals='{"message": "Approve all remaining drafts"}'>
+          Approve all remaining
+        </button>
+      </div>
+    {% endif %}
+
+    {% if result.tool_name == "reject_asset" and not result.requires_confirmation %}
+      <div class="cluster" style="margin-top: 10px;">
+        <span class="muted small">Next:</span>
+        <button type="button" class="chip chip--primary"
+                hx-post="/ui/assistant/chat" hx-target="#assistant-thread" hx-swap="beforeend"
+                hx-vals='{"message": "Show me the remaining drafts to review"}'>
+          Continue reviewing
+        </button>
+      </div>
+    {% endif %}
+
+    {% if result.tool_name == "where_did_we_leave_off" and not result.requires_confirmation and d.next_step %}
+      <div class="cluster" style="margin-top: 10px;">
+        <span class="muted small">Next:</span>
+        <button type="button" class="chip chip--primary"
+                hx-post="/ui/assistant/chat" hx-target="#assistant-thread" hx-swap="beforeend"
+                hx-vals='{"message": "{{ d.next_step }}"}'>
+          {{ d.next_step }}
+        </button>
+      </div>
+    {% endif %}
+
+    {% if result.input_tokens or result.output_tokens %}
+      <div class="muted small assistant__meta">
+        Tokens in/out: {{ result.input_tokens }}/{{ result.output_tokens }} ·
+        Turns: {{ result.turns }}
+      </div>
+    {% endif %}
+  {% endif %}
+</div>

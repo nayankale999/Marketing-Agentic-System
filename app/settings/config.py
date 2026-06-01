@@ -26,6 +26,10 @@ class Settings(BaseSettings):
     # Session cookie signing (override in prod via env)
     session_secret: str = "dev-only-not-a-real-secret"
 
+    # Dev-only impersonation endpoint (/api/auth/dev-impersonate). MUST
+    # be False in any non-dev deployment; the endpoint 404s when off.
+    dev_impersonation_enabled: bool = False
+
     # Fernet key for `integration_credential.encrypted_payload` (44-char
     # url-safe base64 of 32 bytes). MUST be overridden in prod via env;
     # generate with `python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"`.

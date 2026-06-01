@@ -51,6 +51,13 @@ class Settings(BaseSettings):
     plausible_api_key: str = ""
     plausible_site_id: str = ""
 
+    # Apollo.io enrichment (W43, outbound personalisation). Empty key
+    # disables enrichment — the assistant tool will report "not configured"
+    # rather than calling the API.
+    apollo_api_key: str = ""
+    apollo_base_url: str = "https://api.apollo.io/api/v1"
+    apollo_request_timeout_seconds: float = 10.0
+
     # Anthropic
     anthropic_api_key: str = ""
     # Default model for the `copywriting.generate` tool. Override per-tenant or

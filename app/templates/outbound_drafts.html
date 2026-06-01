@@ -1,0 +1,125 @@
+{% extends "base.html" %}
+{% from "_macros.html" import section_heading, status_badge %}
+
+{% block title %}MAS — Personalised drafts · {{ campaign.name }}{% endblock %}
+
+{% block content %}
+<header class="stack">
+  <h1>Personalised outreach</h1>
+  <div class="muted small">
+    Campaign: <strong>{{ campaign.name }}</strong>
+    · {{ status_badge(campaign.status.value) }}
+    {% if audience %}· Audience: <strong>{{ audience.name }}</strong>{% endif %}
+    · {{ member_count }} contact(s)
+  </div>
+  <div class="cluster" style="gap: 8px; margin-top: 8px;">
+    <a class="button button--link" href="/ui/campaigns/{{ campaign.id }}">← Campaign page</a>
+    <a class="button button--link" href="/ui/outbound/upload">Upload more contacts</a>
+  </div>
+</header>
+
+{% if member_count == 0 %}
+  <section class="card">
+    {{ section_heading("No contacts yet", "empty") }}
+    <p>This campaign doesn't have any audience members yet.
+       <a href="/ui/outbound/upload">Upload a CSV</a> to get started.</p>
+  </section>
+
+{% elif drafts_by_contact|length == 0 %}
+  <section class="card">
+    {{ section_heading("Contacts imported — drafts not yet generated", "empty") }}
+    <p>{{ member_count }} contact(s) are in this audience but no
+       personalised drafts have been generated yet.</p>
+    <p>Ask the assistant on the <a href="/ui/">dashboard</a>:</p>
+    <ul>
+      <li><em>"Enrich audience for {{ campaign.name }}"</em> — fills missing
+          titles, LinkedIn URLs, seniority via Apollo (if configured).</li>
+      <li><em>"Draft outbound for {{ campaign.name }}"</em> — generates per-segment
+          LinkedIn DM + email templates.</li>
+    </ul>
+    <p>Then reload this page.</p>
+  </section>
+
+{% else %}
+  <section class="card">
+    {{ section_heading("Per-contact drafts", "drafts") }}
+    <div class="muted small" style="margin-bottom: 12px;">
+      Each card below is one contact's rendered LinkedIn DM + email, filled
+      in with their fields. The SDR can copy + paste each into LinkedIn or
+      their mail client. No automated sending — these are drafts only.
+    </div>
+
+    {% for c in drafts_by_contact %}
+      <div class="contact-card">
+        <div class="contact-card__head">
+          <div>
+            <strong>{{ c.name or c.email }}</strong>
+            {% if c.title %}<span class="muted small"> · {{ c.title }}</span>{% endif %}
+            {% if c.company %}<span class="muted small"> · {{ c.company }}</span>{% endif %}
+          </div>
+          <div class="muted small">
+            <span class="chip">{{ c.segment_label }}</span>
+            {% if c.linkedin_url %}
+              <a href="{{ c.linkedin_url }}" target="_blank" rel="noopener">LinkedIn ↗</a>
+            {% endif %}
+          </div>
+        </div>
+
+        {% if c.linkedin_dm %}
+          <div class="draft-block">
+            <div class="draft-block__head">
+              <span class="draft-block__label">LinkedIn DM</span>
+              <button type="button"
+                      class="button button--link copy-btn"
+                      data-copy-target="li-{{ loop.index }}">Copy</button>
+            </div>
+            <pre id="li-{{ loop.index }}" class="draft-block__body">{{ c.linkedin_dm.body }}</pre>
+          </div>
+        {% endif %}
+
+        {% if c.email_draft %}
+          <div class="draft-block">
+            <div class="draft-block__head">
+              <span class="draft-block__label">Email</span>
+              <button type="button"
+                      class="button button--link copy-btn"
+                      data-copy-target="em-{{ loop.index }}">Copy</button>
+            </div>
+            {% if c.email_draft.subject %}
+              <div class="draft-block__subject">
+                <strong>Subject:</strong> {{ c.email_draft.subject }}
+              </div>
+            {% endif %}
+            <pre id="em-{{ loop.index }}" class="draft-block__body">{{ c.email_draft.body }}</pre>
+          </div>
+        {% endif %}
+      </div>
+    {% endfor %}
+  </section>
+{% endif %}
+
+<script>
+  // Copy-to-clipboard for each draft block.
+  document.querySelectorAll(".copy-btn").forEach((btn) => {
+    btn.addEventListener("click", async () => {
+      const targetId = btn.getAttribute("data-copy-target");
+      const target = document.getElementById(targetId);
+      if (!target) return;
+      let text = target.textContent || "";
+      // Include subject for email copies.
+      const subjectEl = target.previousElementSibling;
+      if (subjectEl && subjectEl.classList.contains("draft-block__subject")) {
+        text = subjectEl.textContent.replace(/^Subject:\s*/, "Subject: ") + "\n\n" + text;
+      }
+      try {
+        await navigator.clipboard.writeText(text);
+        const original = btn.textContent;
+        btn.textContent = "Copied ✓";
+        setTimeout(() => { btn.textContent = original; }, 1500);
+      } catch (_) {
+        btn.textContent = "Copy failed";
+      }
+    });
+  });
+</script>
+{% endblock %}

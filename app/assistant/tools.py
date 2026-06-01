@@ -1320,6 +1320,257 @@ async def launch_campaign(
 
 
 # ---------------------------------------------------------------------------
+# W43 — Outbound personalisation (CSV → Apollo → segmented drafts)
+# ---------------------------------------------------------------------------
+
+
+async def _resolve_audience_for_campaign(
+    session: AsyncSession, *, campaign: Campaign
+):
+    """Pick the most-recent Audience attached to the campaign. The
+    outbound flow expects one — the CSV upload UI creates a fresh
+    Audience per upload."""
+    from app.db.models import Audience
+
+    audience = (
+        await session.execute(
+            select(Audience)
+            .where(Audience.campaign_id == campaign.id)
+            .order_by(Audience.created_at.desc())
+            .limit(1)
+        )
+    ).scalar_one_or_none()
+    if audience is None:
+        raise ToolError(
+            f"'{campaign.name}' has no audience attached yet. Upload a CSV at "
+            "/ui/outbound/upload, then come back."
+        )
+    return audience
+
+
+async def enrich_audience(
+    session: AsyncSession,
+    *,
+    user: AppUser,
+    campaign: str,
+    max_to_enrich: int = 200,
+) -> ToolResult:
+    """Backfill missing personalisation fields (title, seniority,
+    linkedin_url, company) on every member of the campaign's audience
+    using Apollo. Manager+ because it spends API credits."""
+    _require_role(user, UserRole.marketer)
+    c = await _find_campaign(session, tenant_id=user.tenant_id, identifier=campaign)
+    audience = await _resolve_audience_for_campaign(session, campaign=c)
+
+    from app.integrations.apollo import (
+        ApolloClient,
+        EnrichmentDisabledError,
+    )
+    from app.outbound import enrich_audience as enrich_audience_impl
+    from app.settings.config import get_settings
+
+    settings = get_settings()
+    try:
+        client = ApolloClient(
+            api_key=settings.apollo_api_key,
+            base_url=settings.apollo_base_url,
+            timeout_seconds=settings.apollo_request_timeout_seconds,
+        )
+    except EnrichmentDisabledError as exc:
+        raise ToolError(
+            "Apollo enrichment isn't configured (no APOLLO_API_KEY). Ask "
+            "your admin to set the key in .env.local, then try again."
+        ) from exc
+
+    summary = await enrich_audience_impl(
+        session,
+        audience_id=audience.id,
+        apollo=client,
+        max_to_enrich=max_to_enrich,
+    )
+    return ToolResult(
+        summary=(
+            f"Enriched {summary.enriched}/{summary.total_members} contact(s) "
+            f"on '{c.name}' via Apollo. "
+            f"{summary.already_complete} already complete, "
+            f"{summary.not_found} not in Apollo, "
+            f"{summary.failed} failed."
+        ),
+        data={
+            "campaign_id": str(c.id),
+            "campaign_name": c.name,
+            "audience_id": str(audience.id),
+            "total_members": summary.total_members,
+            "enriched": summary.enriched,
+            "already_complete": summary.already_complete,
+            "not_found": summary.not_found,
+            "failed": summary.failed,
+            "errors": summary.errors[:5],
+        },
+    )
+
+
+async def draft_outbound(
+    session: AsyncSession,
+    *,
+    user: AppUser,
+    campaign: str,
+    confirm: bool = False,
+    overwrite: bool = False,
+) -> ToolResult:
+    """Generate per-segment LinkedIn DM + email templates for the
+    campaign's audience. Costs real Anthropic spend (1 LLM call per
+    segment × 2 channels), so we gate behind confirm."""
+    _require_role(user, UserRole.marketer)
+    c = await _find_campaign(session, tenant_id=user.tenant_id, identifier=campaign)
+    audience = await _resolve_audience_for_campaign(session, campaign=c)
+
+    # Count members + segments to give a real cost estimate at confirm-time.
+    from app.db.models import AudienceMember
+    from app.outbound import segment_members
+
+    rows = (
+        await session.execute(
+            select(AudienceMember).where(AudienceMember.audience_id == audience.id)
+        )
+    ).scalars().all()
+    if not rows:
+        raise ToolError(f"Audience for '{c.name}' is empty.")
+    segments = segment_members(list(rows))
+    n_calls = len(segments) * 2
+
+    if not confirm:
+        return ToolResult(
+            summary=(
+                f"Draft personalised outreach for '{c.name}'? "
+                f"This will segment {len(rows)} contact(s) into "
+                f"{len(segments)} bucket(s) and make {n_calls} LLM call(s) "
+                "(LinkedIn DM + email per segment)."
+            ),
+            data={
+                "campaign_id": str(c.id),
+                "audience_id": str(audience.id),
+                "members": len(rows),
+                "segments": [
+                    {
+                        "key": s.bucket.key,
+                        "label": s.bucket.label,
+                        "count": len(s.members),
+                    }
+                    for s in segments
+                ],
+                "llm_calls": n_calls,
+            },
+            requires_confirmation=True,
+        )
+
+    from anthropic import AsyncAnthropic
+
+    from app.outbound import generate_outreach_drafts
+    from app.settings.config import get_settings
+
+    settings = get_settings()
+    if not settings.anthropic_api_key:
+        raise ToolError(
+            "Anthropic API key not configured — can't draft outreach."
+        )
+    client = AsyncAnthropic(api_key=settings.anthropic_api_key)
+    summary = await generate_outreach_drafts(
+        session,
+        campaign=c,
+        audience_id=audience.id,
+        anthropic_client=client,
+        model=settings.copywriting_model,
+        overwrite=overwrite,
+    )
+    return ToolResult(
+        summary=(
+            f"Drafted {summary.linkedin_assets} LinkedIn + "
+            f"{summary.email_assets} email template(s) across "
+            f"{summary.segments_generated} segment(s) on '{c.name}'. "
+            f"{summary.skipped_existing} skipped (already drafted). "
+            f"Open /ui/campaigns/{c.id}/personalised-drafts to review."
+        ),
+        data={
+            "campaign_id": str(c.id),
+            "audience_id": str(audience.id),
+            "segments_generated": summary.segments_generated,
+            "linkedin_assets": summary.linkedin_assets,
+            "email_assets": summary.email_assets,
+            "skipped_existing": summary.skipped_existing,
+            "errors": summary.errors[:5],
+            "link": f"/ui/campaigns/{c.id}/personalised-drafts",
+        },
+    )
+
+
+async def list_personalised_drafts(
+    session: AsyncSession,
+    *,
+    user: AppUser,
+    campaign: str,
+    preview_count: int = 3,
+) -> ToolResult:
+    """Render a few rendered per-contact drafts so the user can sanity-
+    check the personalisation before scrolling the full list."""
+    _require_role(user, UserRole.viewer)
+    c = await _find_campaign(session, tenant_id=user.tenant_id, identifier=campaign)
+    audience = await _resolve_audience_for_campaign(session, campaign=c)
+
+    from app.outbound import render_personalised_drafts
+
+    drafts = await render_personalised_drafts(
+        session, campaign_id=c.id, audience_id=audience.id
+    )
+    if not drafts:
+        return ToolResult(
+            summary=(
+                f"No personalised drafts yet for '{c.name}'. Call "
+                "`draft_outbound` to generate them."
+            ),
+            data={
+                "campaign_id": str(c.id),
+                "audience_id": str(audience.id),
+                "draft_count": 0,
+            },
+        )
+
+    by_contact: dict[str, dict[str, Any]] = {}
+    for d in drafts:
+        entry = by_contact.setdefault(
+            d.contact_email,
+            {
+                "email": d.contact_email,
+                "name": d.contact_name,
+                "title": d.contact_title,
+                "company": d.contact_company,
+                "segment": d.segment_label,
+            },
+        )
+        if d.channel == "linkedin_dm":
+            entry["linkedin_preview"] = d.body[:180]
+        else:
+            entry["email_subject"] = d.subject
+            entry["email_preview"] = d.body[:180]
+
+    preview = list(by_contact.values())[:preview_count]
+    return ToolResult(
+        summary=(
+            f"{len(by_contact)} contact(s) have rendered drafts on '{c.name}'. "
+            f"Showing {len(preview)} as a preview. Open "
+            f"/ui/campaigns/{c.id}/personalised-drafts for the full list."
+        ),
+        data={
+            "campaign_id": str(c.id),
+            "audience_id": str(audience.id),
+            "draft_count": len(by_contact),
+            "preview": preview,
+            "link": f"/ui/campaigns/{c.id}/personalised-drafts",
+        },
+    )
+
+
+# ---------------------------------------------------------------------------
 # Tool catalog — JSON schemas Claude sees
 # ---------------------------------------------------------------------------
 
@@ -1678,6 +1929,86 @@ TOOL_DEFINITIONS: list[dict[str, Any]] = [
         ),
         "input_schema": {"type": "object", "properties": {}},
     },
+    # W43 — outbound personalisation
+    {
+        "name": "enrich_audience",
+        "description": (
+            "Backfill missing personalisation fields (title, seniority, "
+            "linkedin_url, company) on every member of the campaign's "
+            "audience using Apollo.io. Call this AFTER the user uploads "
+            "a CSV and BEFORE drafting outreach. Manager+ — uses paid "
+            "Apollo credits. Requires apollo_api_key to be configured."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "campaign": {
+                    "type": "string",
+                    "description": "Campaign UUID or (partial) name.",
+                },
+                "max_to_enrich": {
+                    "type": "integer",
+                    "description": "Cap on contacts to enrich this call "
+                    "(default 200).",
+                },
+            },
+            "required": ["campaign"],
+        },
+    },
+    {
+        "name": "draft_outbound",
+        "description": (
+            "Generate per-segment LinkedIn DM + email templates for the "
+            "campaign's audience. Segments contacts by seniority into "
+            "3-5 buckets, then makes one LLM call per (segment × channel). "
+            "Requires confirmation — costs Anthropic credits. Manager+. "
+            "On first call pass confirm=false; once the user says 'yes', "
+            "call again with confirm=true."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "campaign": {
+                    "type": "string",
+                    "description": "Campaign UUID or (partial) name.",
+                },
+                "confirm": {
+                    "type": "boolean",
+                    "description": "True to actually spend LLM credits.",
+                },
+                "overwrite": {
+                    "type": "boolean",
+                    "description": "True to regenerate templates that "
+                    "already exist (defaults false — skip).",
+                },
+            },
+            "required": ["campaign"],
+        },
+    },
+    {
+        "name": "list_personalised_drafts",
+        "description": (
+            "Show a preview of the per-contact LinkedIn DM + email drafts "
+            "with merge tokens filled in. Use after `draft_outbound` to "
+            "let the user sanity-check the personalisation. The full list "
+            "is at /ui/campaigns/{id}/personalised-drafts."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "campaign": {
+                    "type": "string",
+                    "description": "Campaign UUID or (partial) name.",
+                },
+                "preview_count": {
+                    "type": "integer",
+                    "description": "How many contacts to preview "
+                    "(default 3).",
+                },
+            },
+            "required": ["campaign"],
+        },
+    },
 ]
 
 
@@ -1708,6 +2039,10 @@ TOOL_HANDLERS = {
     "approve_asset": approve_asset,
     "reject_asset": reject_asset,
     "where_did_we_leave_off": where_did_we_leave_off,
+    # W43 — outbound personalisation
+    "enrich_audience": enrich_audience,
+    "draft_outbound": draft_outbound,
+    "list_personalised_drafts": list_personalised_drafts,
 }
 
 
@@ -1740,4 +2075,7 @@ __all__ = [
     "approve_asset",
     "reject_asset",
     "where_did_we_leave_off",
+    "enrich_audience",
+    "draft_outbound",
+    "list_personalised_drafts",
 ]

@@ -84,6 +84,9 @@ class AssetType(enum.StrEnum):
     landing_page_copy = "landing_page_copy"
     sms = "sms"
     push = "push"
+    # W43 — per-contact LinkedIn DM drafts. No real send: we generate the
+    # text and surface it for the SDR to copy/paste manually.
+    linkedin_dm = "linkedin_dm"
 
 
 class AssetStatus(enum.StrEnum):

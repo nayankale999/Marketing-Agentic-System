@@ -24,8 +24,21 @@ KNOWN_FIELDS: tuple[str, ...] = (
     "company",
     "country",
     "tags",
+    # W43: outbound-personalisation fields. Optional. If absent, the
+    # Apollo enrichment task can fill them later.
+    "title",
+    "seniority",
+    "linkedin_url",
+    "phone",
+    "industry",
 )
-_NAME_FIELDS: tuple[str, ...] = ("first_name", "last_name", "company")
+_NAME_FIELDS: tuple[str, ...] = (
+    "first_name",
+    "last_name",
+    "company",
+    "title",
+    "industry",
+)
 _MAX_NAME_LEN = 200
 DEFAULT_MAX_ROWS = 10_000
 
@@ -146,6 +159,12 @@ def parse_csv(content: str, *, max_rows: int = DEFAULT_MAX_ROWS) -> CsvParseResu
             payload["country"] = country
         if tags:
             payload["tags"] = tags
+        # W43: pick up the remaining KNOWN_FIELDS (linkedin_url, phone,
+        # seniority) verbatim — no validation beyond non-empty.
+        for f in ("linkedin_url", "phone", "seniority"):
+            v = normalized.get(f)
+            if v:
+                payload[f] = v
 
         valid.append(ParsedRow(row_number=row_index, external_id=email, payload=payload))
 

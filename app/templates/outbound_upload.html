@@ -1,0 +1,77 @@
+{% extends "base.html" %}
+{% from "_macros.html" import section_heading %}
+
+{% block title %}MAS — Upload contacts CSV{% endblock %}
+
+{% block content %}
+<header class="stack">
+  <h1>Upload contacts</h1>
+  <div class="muted small">
+    Upload a CSV of contacts to a campaign. We'll enrich missing fields via
+    Apollo, segment by seniority, and generate per-segment LinkedIn DM + email
+    drafts.
+  </div>
+</header>
+
+<section class="card">
+  {{ section_heading("CSV file", "upload") }}
+
+  {% if error %}
+    <div class="banner banner--danger">{{ error }}</div>
+  {% endif %}
+
+  <form method="post" action="/ui/outbound/upload" enctype="multipart/form-data">
+    <div class="stack" style="gap: 14px;">
+      <label class="form-row">
+        <span class="form-row__label">Campaign</span>
+        <select name="campaign_id" required>
+          <option value="">— pick a campaign —</option>
+          {% for c in campaigns %}
+            <option value="{{ c.id }}">{{ c.name }} <em>({{ c.status.value }})</em></option>
+          {% endfor %}
+        </select>
+      </label>
+
+      <label class="form-row">
+        <span class="form-row__label">Audience name (optional)</span>
+        <input type="text" name="audience_name" placeholder="e.g. Q3 SaaS ops leaders">
+      </label>
+
+      <label class="form-row">
+        <span class="form-row__label">CSV file</span>
+        <input type="file" name="file" accept=".csv,text/csv" required>
+      </label>
+
+      <div class="muted small">
+        Required column: <code>email</code>. Optional columns we recognise:
+        <code>first_name</code>, <code>last_name</code>, <code>company</code>,
+        <code>title</code>, <code>seniority</code>, <code>linkedin_url</code>,
+        <code>industry</code>, <code>country</code> (ISO-2), <code>tags</code>
+        (comma-separated). Anything missing will be backfilled by Apollo if
+        an API key is configured.
+      </div>
+
+      <div>
+        <button type="submit" class="button button--primary">Upload + import</button>
+        <a href="/ui/" class="button button--link">Cancel</a>
+      </div>
+    </div>
+  </form>
+</section>
+
+<section class="card">
+  {{ section_heading("After import", "next") }}
+  <div class="stack" style="gap: 8px;">
+    <p>Once the import lands you'll arrive on the <strong>Personalised drafts</strong>
+       page. From there you can:</p>
+    <ul>
+      <li>Tell the assistant <em>"enrich the audience for [campaign name]"</em>
+          — fills missing titles, LinkedIn URLs, seniority via Apollo.</li>
+      <li>Tell the assistant <em>"draft outbound for [campaign name]"</em> —
+          generates one LinkedIn DM + email template per seniority segment.</li>
+      <li>Refresh the drafts page to see every contact's rendered messages
+          with copy-to-clipboard.</li>
+    </ul>
+  </div>
+</section>
+{% endblock %}

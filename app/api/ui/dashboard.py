@@ -5,7 +5,7 @@ from __future__ import annotations
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, Form, HTTPException, Request, status
-from fastapi.responses import HTMLResponse, RedirectResponse
+from fastapi.responses import HTMLResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import get_tenant_db, require_role
@@ -193,10 +193,68 @@ def _error_payload(msg: str) -> object:
     return AssistantResult(text="", error=msg)
 
 
-@router.get("/me", include_in_schema=False)
-async def ui_me_redirect(
-    _user: AppUser = Depends(require_role(UserRole.viewer)),
-) -> RedirectResponse:
-    """Convenience: bare `/ui/me` redirects to the dashboard. The
-    `/api/me` JSON endpoint stays where it is."""
-    return RedirectResponse(url="/ui/")
+@router.get("/me", response_class=HTMLResponse)
+async def ui_me(
+    request: Request,
+    current_user: AppUser = Depends(require_role(UserRole.viewer)),
+    db: AsyncSession = Depends(get_tenant_db),
+) -> HTMLResponse:
+    """The 'My account' page — profile + recent activity + sign-out.
+    Replaces the old redirect-to-dashboard placeholder."""
+    from sqlalchemy import select as _select
+
+    from app.db.models import (
+        ApprovalDecisionLog,
+        Campaign,
+        ContentAsset,
+        Tenant,
+    )
+
+    tenant = await db.get(Tenant, current_user.tenant_id)
+
+    # Campaigns owned by this user (most recent first).
+    my_campaigns = (
+        await db.execute(
+            _select(Campaign)
+            .where(Campaign.owner_id == current_user.id)
+            .order_by(Campaign.created_at.desc())
+            .limit(5)
+        )
+    ).scalars().all()
+
+    # Approval decisions this user made (most recent first).
+    decisions_rows = (
+        await db.execute(
+            _select(ApprovalDecisionLog, ContentAsset, Campaign)
+            .join(ContentAsset, ContentAsset.id == ApprovalDecisionLog.content_asset_id)
+            .join(Campaign, Campaign.id == ContentAsset.campaign_id)
+            .where(ApprovalDecisionLog.reviewer_id == current_user.id)
+            .order_by(ApprovalDecisionLog.decided_at.desc())
+            .limit(5)
+        )
+    ).all()
+    my_decisions = [
+        {
+            "decision_id": d.id,
+            "decision": d.decision.value,
+            "decided_at": d.decided_at,
+            "asset_id": a.id,
+            "asset_title": a.title,
+            "asset_type": a.asset_type.value,
+            "campaign_id": c.id,
+            "campaign_name": c.name,
+            "reason": d.reason,
+        }
+        for d, a, c in decisions_rows
+    ]
+
+    return templates.TemplateResponse(
+        request,
+        "me.html",
+        {
+            "current_user": current_user,
+            "tenant": tenant,
+            "my_campaigns": my_campaigns,
+            "my_decisions": my_decisions,
+        },
+    )

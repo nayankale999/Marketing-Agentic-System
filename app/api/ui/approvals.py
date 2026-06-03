@@ -42,11 +42,6 @@ from app.db.models import (
     Campaign,
     ContentAsset,
 )
-from app.orchestrator.state_machine import (
-    GuardFailedError,
-    UnknownTransitionError,
-    campaign_sm,
-)
 
 router = APIRouter(prefix="/ui/approvals", tags=["ui"])
 
@@ -59,37 +54,97 @@ async def approval_queue(
     _user: AppUser = Depends(require_role(UserRole.manager)),
     db: AsyncSession = Depends(get_tenant_db),
 ) -> HTMLResponse:
+    """Approvals overview. Three sections:
+      * Pending review — assets formally submitted (pending_approval).
+      * Drafted, awaiting your call — assets sitting in `drafted` (the
+        assistant flow lands them here when content_creator finishes).
+      * Recently decided — last 20 approvals + rejections, with the
+        reviewer + reason — so the page isn't blank when the queue is
+        empty.
+    """
+    cutoff = datetime.now(UTC) - _OVERDUE_AFTER
+    pending = await _items_in_status(db, AssetStatus.pending_approval, cutoff)
+    drafted = await _items_in_status(db, AssetStatus.drafted, cutoff)
+    recent = await _recent_decisions(db, limit=20)
+
+    return templates.TemplateResponse(
+        request,
+        "approvals/queue.html",
+        {
+            "pending_items": pending,
+            "drafted_items": drafted,
+            "recent_decisions": recent,
+        },
+    )
+
+
+async def _items_in_status(
+    db: AsyncSession, status_value: AssetStatus, cutoff: datetime
+) -> list[dict[str, Any]]:
     rows = (
         await db.execute(
             select(ContentAsset, Campaign)
             .join(Campaign, Campaign.id == ContentAsset.campaign_id)
-            .where(ContentAsset.status == AssetStatus.pending_approval)
+            .where(ContentAsset.status == status_value)
             .order_by(Campaign.end_date.asc(), ContentAsset.updated_at.asc())
         )
     ).all()
-    cutoff = datetime.now(UTC) - _OVERDUE_AFTER
-
-    items = []
+    items: list[dict[str, Any]] = []
     for asset, campaign in rows:
-        compliance = (asset.extra_metadata or {}).get("compliance") or {}
+        meta = asset.extra_metadata or {}
+        compliance = meta.get("compliance") or {}
         items.append(
             {
                 "asset_id": asset.id,
                 "title": asset.title,
                 "asset_type": asset.asset_type.value,
-                "channel_platform": (asset.extra_metadata or {}).get("channel_platform"),
+                "channel_platform": meta.get("channel_platform"),
+                "campaign_id": campaign.id,
                 "campaign_name": campaign.name,
                 "submitted_at": asset.updated_at,
                 "overdue": asset.updated_at < cutoff,
                 "compliance_blocked": bool(compliance.get("blocked")),
+                "segment_label": meta.get("segment_label"),
             }
         )
+    return items
 
-    return templates.TemplateResponse(
-        request,
-        "approvals/queue.html",
-        {"items": items},
-    )
+
+async def _recent_decisions(
+    db: AsyncSession, *, limit: int
+) -> list[dict[str, Any]]:
+    """Pull the last N approval decisions with reviewer + asset + campaign
+    joined in so the queue page can show 'Approved by Ada · 12 min ago'
+    next to each row."""
+    rows = (
+        await db.execute(
+            select(ApprovalDecisionLog, ContentAsset, Campaign, AppUser)
+            .join(ContentAsset, ContentAsset.id == ApprovalDecisionLog.content_asset_id)
+            .join(Campaign, Campaign.id == ContentAsset.campaign_id)
+            .join(AppUser, AppUser.id == ApprovalDecisionLog.reviewer_id)
+            .order_by(ApprovalDecisionLog.decided_at.desc())
+            .limit(limit)
+        )
+    ).all()
+    out: list[dict[str, Any]] = []
+    for decision, asset, campaign, reviewer in rows:
+        out.append(
+            {
+                "decision_id": decision.id,
+                "asset_id": asset.id,
+                "asset_title": asset.title,
+                "asset_type": asset.asset_type.value,
+                "campaign_id": campaign.id,
+                "campaign_name": campaign.name,
+                "decision": decision.decision.value,
+                "reason": decision.reason,
+                "reviewer_name": (
+                    reviewer.display_name or reviewer.email
+                ),
+                "decided_at": decision.decided_at,
+            }
+        )
+    return out
 
 
 @router.get("/{asset_id}", response_class=HTMLResponse)
@@ -150,7 +205,16 @@ async def approve_via_ui(
     if campaign is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, detail="campaign not found")
 
-    if asset.status not in {AssetStatus.pending_approval, AssetStatus.rejected}:
+    # `drafted` is the state the assistant content-generation flow
+    # leaves assets in (no formal submit_for_approval has been called
+    # yet). We accept it here and let the auto-advance helper drive
+    # the campaign through submit_for_approval → start_launch as the
+    # last required asset gets approved.
+    if asset.status not in {
+        AssetStatus.pending_approval,
+        AssetStatus.rejected,
+        AssetStatus.drafted,
+    }:
         return templates.TemplateResponse(
             request,
             "approvals/_decision_result.html",
@@ -235,12 +299,16 @@ async def approve_via_ui(
         metadata={"decision_id": str(decision.id), "via": "ui"},
     )
 
-    # Drive forward if all required assets are now approved.
-    if not await _any_blocking_required_assets(db, campaign):
-        try:
-            await campaign_sm.apply(db, campaign, "start_launch")
-        except (UnknownTransitionError, GuardFailedError):
-            pass
+    # Auto-advance the campaign through the state machine. Handles the
+    # "approved from drafted" case (campaign still in content_in_production
+    # → first push to approval_pending → then start_launch) as well as
+    # the normal "approved while pending_approval" case.
+    from app.approvals import try_advance_after_approval
+
+    advanced_to = await try_advance_after_approval(db, campaign)
+    message_tail = ""
+    if advanced_to == "ready_to_launch":
+        message_tail = " Every required asset is approved — campaign is now ready to launch."
 
     return templates.TemplateResponse(
         request,
@@ -248,9 +316,9 @@ async def approve_via_ui(
         {
             "result_kind": "success",
             "message": (
-                "Approved with edits."
+                "Approved with edits." + message_tail
                 if edits_payload is not None
-                else "Approved."
+                else "Approved." + message_tail
             ),
             "decision_id": str(decision.id),
         },
@@ -287,7 +355,7 @@ async def reject_via_ui(
     if asset is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, detail="asset not found")
 
-    if asset.status != AssetStatus.pending_approval:
+    if asset.status not in {AssetStatus.pending_approval, AssetStatus.drafted}:
         return templates.TemplateResponse(
             request,
             "approvals/_decision_result.html",
@@ -310,6 +378,12 @@ async def reject_via_ui(
     )
     db.add(decision)
     asset.status = AssetStatus.rejected
+    # Mirror the assistant `reject_asset` semantics: rejection from the
+    # UI means "drop this variant from the campaign", not "regenerate
+    # it" (regenerate is a separate API flow). Flip is_required so the
+    # rejection doesn't block the launch guard for the campaign's
+    # remaining approved assets.
+    asset.is_required = False
     await db.flush()
     after = column_snapshot(asset)
 
@@ -329,6 +403,15 @@ async def reject_via_ui(
             "via": "ui",
         },
     )
+
+    # Auto-advance: a rejection on the last blocker can be just as
+    # campaign-moving as an approval (the rejected asset is now
+    # is_required=False so it no longer blocks start_launch).
+    from app.approvals import try_advance_after_approval
+
+    campaign = await db.get(Campaign, asset.campaign_id)
+    if campaign is not None:
+        await try_advance_after_approval(db, campaign)
 
     return templates.TemplateResponse(
         request,
@@ -392,25 +475,3 @@ def _merge_fields(
     return out
 
 
-async def _any_blocking_required_assets(
-    db: AsyncSession, campaign: Campaign
-) -> bool:
-    blocking = (
-        await db.execute(
-            select(ContentAsset.id).where(
-                ContentAsset.campaign_id == campaign.id,
-                ContentAsset.is_required.is_(True),
-                ContentAsset.status.in_(
-                    [
-                        AssetStatus.requested,
-                        AssetStatus.generating,
-                        AssetStatus.drafted,
-                        AssetStatus.pending_approval,
-                        AssetStatus.rejected,
-                        AssetStatus.failed,
-                    ]
-                ),
-            )
-        )
-    ).first()
-    return blocking is not None

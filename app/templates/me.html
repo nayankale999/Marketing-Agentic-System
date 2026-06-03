@@ -1,0 +1,123 @@
+{% extends "base.html" %}
+{% from "_macros.html" import status_badge, section_heading, empty_state %}
+
+{% block title %}MAS — My account{% endblock %}
+
+{% block content %}
+<header class="stack">
+  <h1>My account</h1>
+  <div class="muted small">Your profile, role, and recent activity in MAS.</div>
+</header>
+
+<section class="card">
+  {{ section_heading("Profile", "profile") }}
+  <table class="data-table">
+    <tbody>
+      <tr><th style="width: 180px;">Name</th><td>{{ current_user.display_name or "—" }}</td></tr>
+      <tr><th>Email</th><td>{{ current_user.email }}</td></tr>
+      <tr>
+        <th>Role</th>
+        <td>
+          <span class="badge">{{ current_user.role.value }}</span>
+          <span class="muted small">
+            {% if current_user.role.value == "admin" %}
+              — full access including tenant settings.
+            {% elif current_user.role.value == "manager" %}
+              — can approve content + launch campaigns.
+            {% elif current_user.role.value == "marketer" %}
+              — can create campaigns + draft content. Cannot approve.
+            {% else %}
+              — read-only.
+            {% endif %}
+          </span>
+        </td>
+      </tr>
+      <tr><th>Tenant</th><td>{{ tenant.name if tenant else "—" }}</td></tr>
+      <tr>
+        <th>Last login</th>
+        <td class="muted small">
+          {{ current_user.last_login_at.strftime("%Y-%m-%d %H:%M UTC") if current_user.last_login_at else "—" }}
+        </td>
+      </tr>
+      <tr>
+        <th>Active</th>
+        <td>
+          {% if current_user.is_active %}
+            <span class="badge live">active</span>
+          {% else %}
+            <span class="badge badge--danger">disabled</span>
+          {% endif %}
+        </td>
+      </tr>
+    </tbody>
+  </table>
+  <div class="cluster" style="gap: 8px; margin-top: 12px;">
+    <a href="/api/auth/logout" class="button button--link">Sign out →</a>
+    <a href="/api/me" class="button button--link" target="_blank" rel="noopener">
+      Raw JSON profile ↗
+    </a>
+  </div>
+</section>
+
+<section class="card">
+  {{ section_heading("My campaigns", "campaigns") }}
+  {% if my_campaigns %}
+    <table class="data-table">
+      <thead>
+        <tr><th>Name</th><th>Status</th><th>Start</th><th>End</th><th></th></tr>
+      </thead>
+      <tbody>
+        {% for c in my_campaigns %}
+          <tr>
+            <td>{{ c.name }}</td>
+            <td>{{ status_badge(c.status.value) }}</td>
+            <td class="small">{{ c.start_date }}</td>
+            <td class="small">{{ c.end_date }}</td>
+            <td><a href="/ui/campaigns/{{ c.id }}">Open →</a></td>
+          </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  {% else %}
+    {{ empty_state("You haven't created any campaigns yet. Ask the assistant on the dashboard to start one.") }}
+  {% endif %}
+</section>
+
+<section class="card">
+  {{ section_heading("My recent approvals + rejections", "decisions") }}
+  {% if my_decisions %}
+    <table class="data-table">
+      <thead>
+        <tr>
+          <th>Asset</th>
+          <th>Campaign</th>
+          <th>Decision</th>
+          <th>When</th>
+          <th>Reason</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for d in my_decisions %}
+          <tr>
+            <td><a href="/ui/approvals/{{ d.asset_id }}">{{ d.asset_title or "(untitled)" }}</a></td>
+            <td><a href="/ui/campaigns/{{ d.campaign_id }}">{{ d.campaign_name }}</a></td>
+            <td>
+              {% if d.decision == "approved" %}
+                <span class="badge live">approved</span>
+              {% elif d.decision == "approved_with_edits" %}
+                <span class="badge live">approved (edits)</span>
+              {% else %}
+                <span class="badge badge--danger">rejected</span>
+              {% endif %}
+            </td>
+            <td class="small muted">{{ d.decided_at.strftime("%Y-%m-%d %H:%M") if d.decided_at else "—" }}</td>
+            <td class="small">{{ d.reason or "—" }}</td>
+          </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  {% else %}
+    {{ empty_state("You haven't approved or rejected any assets yet.") }}
+  {% endif %}
+</section>
+{% endblock %}

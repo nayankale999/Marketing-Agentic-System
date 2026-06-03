@@ -1126,27 +1126,12 @@ async def approve_asset(
 async def _try_advance_after_approval(
     session: AsyncSession, campaign: Campaign
 ) -> str | None:
-    """Mirror the API-side `_maybe_advance_to_ready_to_launch`, but also
-    handle the case where the campaign hasn't been `submit_for_approval`-ed
-    yet (which is normal when the assistant drives per-asset approvals
-    straight off the drafted set)."""
-    from app.orchestrator.state_machine import (
-        GuardFailedError,
-        UnknownTransitionError,
-        campaign_sm,
-    )
+    """Thin shim over the shared `try_advance_after_approval` helper —
+    kept so existing tests + tool call sites in this module continue
+    to work without changing imports."""
+    from app.approvals import try_advance_after_approval
 
-    if campaign.status == CampaignStatus.content_in_production:
-        try:
-            await campaign_sm.apply(session, campaign, "submit_for_approval")
-        except (UnknownTransitionError, GuardFailedError):
-            return None
-    if campaign.status == CampaignStatus.approval_pending:
-        try:
-            await campaign_sm.apply(session, campaign, "start_launch")
-        except (UnknownTransitionError, GuardFailedError):
-            return None
-    return campaign.status.value if campaign.status == CampaignStatus.ready_to_launch else None
+    return await try_advance_after_approval(session, campaign)
 
 
 async def reject_asset(

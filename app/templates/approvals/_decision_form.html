@@ -2,7 +2,7 @@
    endpoints; on success, the HTML returned by the UI router swaps this
    whole block out with a confirmation card. #}
 
-{% if asset.status.value in ("pending_approval", "rejected") %}
+{% if asset.status.value in ("pending_approval", "rejected", "drafted") %}
   <div class="stack">
     {# Approve straight #}
     <form method="post" action="/ui/approvals/{{ asset.id }}/approve" hx-post="/ui/approvals/{{ asset.id }}/approve" hx-target="#decision" hx-swap="outerHTML">

@@ -180,7 +180,8 @@ async def test_queue_lists_pending_assets(client_as, world) -> None:
     resp = await client.get("/ui/approvals/queue")
     assert resp.status_code == 200
     body = resp.text
-    assert "Approval queue" in body
+    assert "Approvals" in body
+    assert "Pending your review" in body
     assert "Welcome to the SMB tier" in body
     assert f"/ui/approvals/{world['asset_id']}" in body
 
@@ -203,7 +204,11 @@ async def test_queue_shows_empty_state_when_nothing_pending(
         ) as client:
             resp = await client.get("/ui/approvals/queue")
             assert resp.status_code == 200
-            assert "Queue is empty" in resp.text
+            # New template renders three sections; each shows its own
+            # empty-state when nothing matches.
+            assert "Nothing has been formally submitted" in resp.text
+            assert "No drafts in the queue" in resp.text
+            assert "No decisions recorded yet" in resp.text
     finally:
         app.dependency_overrides.pop(get_current_user, None)
 
@@ -300,7 +305,10 @@ async def test_approve_form_writes_decision_and_returns_fragment(
 
     async with AsyncSession(db_engine, expire_on_commit=False) as session:
         asset = await session.get(ContentAsset, world["asset_id"])
-        assert asset.status == AssetStatus.approved
+        # Auto-advance kicks in: with only one required asset, the
+        # campaign drives through approval_pending → ready_to_launch
+        # and the start_launch on_enter hook schedules the asset.
+        assert asset.status in {AssetStatus.approved, AssetStatus.scheduled}
         decisions = (
             await session.execute(
                 select(ApprovalDecisionLog).where(
@@ -330,7 +338,7 @@ async def test_approve_with_edits_persists_diff(
 
     async with AsyncSession(db_engine, expire_on_commit=False) as session:
         asset = await session.get(ContentAsset, world["asset_id"])
-        assert asset.status == AssetStatus.approved
+        assert asset.status in {AssetStatus.approved, AssetStatus.scheduled}
         assert "edited copy" in (asset.content or "")
         assert asset.extra_metadata["fields"]["subject"] == "New subject line"
         decisions = (

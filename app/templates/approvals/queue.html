@@ -1,36 +1,87 @@
 {% extends "base.html" %}
-{% from "_macros.html" import status_badge, empty_state %}
+{% from "_macros.html" import status_badge, section_heading, empty_state %}
 
-{% block title %}Approval queue — MAS{% endblock %}
+{% block title %}Approvals — MAS{% endblock %}
 
 {% block content %}
-  <header class="stack">
-    <h1>Approval queue</h1>
-    <p class="muted">{{ items | length }} asset{{ "" if items | length == 1 else "s" }} awaiting review.</p>
-  </header>
+<header class="stack">
+  <h1>Approvals</h1>
+  <p class="muted">
+    {{ pending_items | length }} pending review ·
+    {{ drafted_items | length }} drafted ·
+    {{ recent_decisions | length }} recent decision{{ "" if recent_decisions | length == 1 else "s" }}.
+  </p>
+</header>
 
-  {% if items %}
-    <table>
+{# ───────── Pending review (formal submit_for_approval flow) ───────── #}
+<section class="card">
+  {{ section_heading("Pending your review", "pending") }}
+  {% if pending_items %}
+    <table class="data-table">
       <thead>
         <tr>
           <th>Asset</th>
           <th>Campaign</th>
-          <th>Channel</th>
           <th>Type</th>
+          <th>Channel</th>
           <th>Submitted</th>
           <th>Flags</th>
         </tr>
       </thead>
       <tbody>
-        {% for item in items %}
+        {% for item in pending_items %}
           <tr>
             <td><a href="/ui/approvals/{{ item.asset_id }}">{{ item.title or "(untitled)" }}</a></td>
-            <td>{{ item.campaign_name }}</td>
-            <td>{{ item.channel_platform or "—" }}</td>
+            <td><a href="/ui/campaigns/{{ item.campaign_id }}">{{ item.campaign_name }}</a></td>
             <td>{{ item.asset_type }}</td>
-            <td class="small muted">{{ item.submitted_at }}</td>
+            <td>{{ item.channel_platform or "—" }}</td>
+            <td class="small muted">{{ item.submitted_at.strftime("%Y-%m-%d %H:%M") if item.submitted_at else "—" }}</td>
             <td>
               {% if item.overdue %}<span class="badge badge--overdue">overdue</span>{% endif %}
+              {% if item.compliance_blocked %}<span class="badge badge--danger">compliance</span>{% endif %}
+              {% if item.segment_label %}<span class="badge">{{ item.segment_label }}</span>{% endif %}
+            </td>
+          </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  {% else %}
+    {{ empty_state("Nothing has been formally submitted for review.") }}
+  {% endif %}
+</section>
+
+{# ───────── Drafted (assistant-flow path: content_creator finished, awaiting decision) ───────── #}
+<section class="card">
+  {{ section_heading("Drafted — awaiting your call", "drafted") }}
+  <div class="muted small" style="margin-bottom: 8px;">
+    Assets from the assistant's content-generation flow land here. Approve via the
+    asistant chat ("approve all" / "approve <asset id>") or click into one to review.
+  </div>
+  {% if drafted_items %}
+    <table class="data-table">
+      <thead>
+        <tr>
+          <th>Asset</th>
+          <th>Campaign</th>
+          <th>Type</th>
+          <th>Channel / Segment</th>
+          <th>Drafted</th>
+          <th>Flags</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for item in drafted_items %}
+          <tr>
+            <td><a href="/ui/approvals/{{ item.asset_id }}">{{ item.title or "(untitled)" }}</a></td>
+            <td><a href="/ui/campaigns/{{ item.campaign_id }}">{{ item.campaign_name }}</a></td>
+            <td>{{ item.asset_type }}</td>
+            <td>
+              {% if item.segment_label %}<span class="badge">{{ item.segment_label }}</span>{% endif %}
+              {{ item.channel_platform or "" }}
+            </td>
+            <td class="small muted">{{ item.submitted_at.strftime("%Y-%m-%d %H:%M") if item.submitted_at else "—" }}</td>
+            <td>
+              {% if item.overdue %}<span class="badge badge--overdue">aging</span>{% endif %}
               {% if item.compliance_blocked %}<span class="badge badge--danger">compliance</span>{% endif %}
             </td>
           </tr>
@@ -38,6 +89,51 @@
       </tbody>
     </table>
   {% else %}
-    {{ empty_state("Queue is empty.") }}
+    {{ empty_state("No drafts in the queue. The assistant lands drafts here after generate_content.") }}
   {% endif %}
+</section>
+
+{# ───────── Recent decisions ───────── #}
+<section class="card">
+  {{ section_heading("Recent decisions", "recent") }}
+  {% if recent_decisions %}
+    <table class="data-table">
+      <thead>
+        <tr>
+          <th>Asset</th>
+          <th>Campaign</th>
+          <th>Decision</th>
+          <th>Reviewer</th>
+          <th>When</th>
+          <th>Reason</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for d in recent_decisions %}
+          <tr>
+            <td>
+              <a href="/ui/approvals/{{ d.asset_id }}">{{ d.asset_title or "(untitled)" }}</a>
+              <span class="muted small">· {{ d.asset_type }}</span>
+            </td>
+            <td><a href="/ui/campaigns/{{ d.campaign_id }}">{{ d.campaign_name }}</a></td>
+            <td>
+              {% if d.decision == "approved" %}
+                <span class="badge live">approved</span>
+              {% elif d.decision == "approved_with_edits" %}
+                <span class="badge live">approved (edits)</span>
+              {% else %}
+                <span class="badge badge--danger">rejected</span>
+              {% endif %}
+            </td>
+            <td>{{ d.reviewer_name }}</td>
+            <td class="small muted">{{ d.decided_at.strftime("%Y-%m-%d %H:%M") if d.decided_at else "—" }}</td>
+            <td class="small">{{ d.reason or "—" }}</td>
+          </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  {% else %}
+    {{ empty_state("No decisions recorded yet — approve or reject an asset to populate this list.") }}
+  {% endif %}
+</section>
 {% endblock %}
